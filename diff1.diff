@@ -1,0 +1,70 @@
+--- a/src/roland_discovery/ssh/client.py
++++ b/src/roland_discovery/ssh/client.py
+@@ class SshClient:
+     def _connect(self) -> None:
+         self._client = paramiko.SSHClient()
+         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+@@
+         self._client.connect(
+             hostname=self.host,
+             port=self.port,
+             username=self.username,
+             password=self.password,
+             timeout=self.timeout_connect,
+             banner_timeout=self.timeout_banner,
+             auth_timeout=self.timeout_auth,
+             look_for_keys=False,
+             allow_agent=False,
+         )
++
++        # Keepalive helps with older/quirky Cisco SSH implementations.
++        try:
++            t = self._client.get_transport()
++            if t is not None:
++                t.set_keepalive(15)
++        except Exception:
++            pass
+
+@@
+-    def exec(self, command: str, command_timeout: int | None = None) -> str:
++    def exec(self, command: str, command_timeout: int | None = None) -> str:
+         """
+         Run a single command (non-interactive). Returns stdout (best-effort).
+         """
+         if not self._client:
+             self._connect()
+ 
++        if self._ssh_debug:
++            print(f"[roland][ssh-debug] exec host={self.host} cmd={command!r} get_pty=True timeout={command_timeout}")
++
+         try:
+-            stdin, stdout, stderr = self._client.exec_command(command, timeout=command_timeout)
+-            out = stdout.read().decode(errors="replace")
+-            err = stderr.read().decode(errors="replace")
++            # Many Cisco devices behave better if we request a PTY.
++            stdin, stdout, stderr = self._client.exec_command(
++                command,
++                timeout=command_timeout,
++                get_pty=True,
++            )
++
++            # Some devices close the channel quickly; paramiko can surface EOFError while reading.
++            # Treat EOFError as "end of output" instead of hard failure.
++            try:
++                out_b = stdout.read()
++            except EOFError:
++                out_b = b""
++            try:
++                err_b = stderr.read()
++            except EOFError:
++                err_b = b""
++
++            out = out_b.decode(errors="replace")
++            err = err_b.decode(errors="replace")
++
+             # If device writes prompts/errors to stderr, keep it for debugging.
+             if err and not out:
+                 out = err
+             return out
+         except Exception:
+             raise

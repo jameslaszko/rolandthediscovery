@@ -1,0 +1,68 @@
+import networkx as nx
+
+
+def merge_by_hostname(g: nx.Graph) -> nx.Graph:
+    """
+    Merge nodes that share the same hostname ("name") into a single node.
+    Keeps edges, aggregates IPs into attrs["ips"] where possible.
+    """
+    ng = nx.Graph()
+
+    # hostname -> canonical node id
+    host_to_nid: dict[str, str] = {}
+    # old node id -> canonical node id
+    old_to_new: dict[str, str] = {}
+
+    # 1) Create canonical nodes
+    for nid, attrs in g.nodes(data=True):
+        name = (attrs.get("name") or "").strip()
+        ip = (attrs.get("ip") or "").strip()
+
+        if name:
+            if name not in host_to_nid:
+                host_to_nid[name] = nid
+                ng.add_node(nid, **attrs)
+            old_to_new[nid] = host_to_nid[name]
+        else:
+            # no hostname => keep distinct
+            ng.add_node(nid, **attrs)
+            old_to_new[nid] = nid
+
+        # also record ips on canonical
+        canon = old_to_new[nid]
+        cattrs = ng.nodes[canon]
+        ips = set(cattrs.get("ips") or [])
+        if ip:
+            ips.add(ip)
+        if ips:
+            cattrs["ips"] = sorted(ips)
+
+    # 2) Rebuild edges (dedupe)
+    for u, v, eattrs in g.edges(data=True):
+        nu = old_to_new.get(u, u)
+        nv = old_to_new.get(v, v)
+        if nu == nv:
+            continue
+
+        if ng.has_edge(nu, nv):
+            # merge edge evidence
+            ex = ng[nu][nv].get("evidence") or []
+            add = eattrs.get("evidence") or []
+            ng[nu][nv]["evidence"] = ex + add
+        else:
+            ng.add_edge(nu, nv, **eattrs)
+
+    # 3) Ensure IP aggregation on merged nodes
+    for nid, attrs in ng.nodes(data=True):
+        ip = (attrs.get("ip") or "").strip()
+        ips = set(attrs.get("ips") or [])
+        if ip:
+            ips.add(ip)
+        if ips:
+            attrs["ips"] = sorted(ips)
+
+    return ng
+
+
+# Backwards-compatible alias (older code imported this name)
+merge_graph_by_hostname = merge_by_hostname

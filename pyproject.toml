@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roland-the-discovery"
+version = "2.0.4.0"
+description = "SNMPv2c (via snmpwalk) + CDP + MAC-table discovery for Cisco networks"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "paramiko>=3.4.0",
+  "networkx>=3.2",
+  "pyvis>=0.3.2",
+]
+
+[project.scripts]
+roland-discovery = "roland_discovery.main:main"
