@@ -215,6 +215,7 @@ def build_topology(
         if ip not in g:
             g.add_node(ip, ip=ip)
 
+        # SNMP poll
         poll_status = "ok"
         poll_error = ""
         sysname = ""
@@ -248,7 +249,7 @@ def build_topology(
             "ip_to_ifname": ip_to_ifname,
         })
 
-        # SSH enrichment (unchanged)
+        # SSH enrichment
         if enable_ssh and ssh_profile is not None:
             from roland_discovery.ssh.enrich import (
                 parse_show_ip_interface_brief,
@@ -313,74 +314,103 @@ def build_topology(
             print(f"[roland] orphan_svis calc failed for {ip}: {e}")
             g.nodes[ip]["orphan_svis"] = []
 
-        if poll_status != "ok" or depth >= max_depth:
-            print(f"[DEBUG] Skipping deeper traversal for {ip} (poll={poll_status}, depth={depth} >= max_depth={max_depth})")
+        # Allow traversal even if SNMP failed (as long as depth allows)
+        if depth >= max_depth:
+            print(f"[DEBUG] Max depth reached for {ip}")
             continue
 
-        # CDP neighbors
+        # CDP neighbors → enqueue + add edges
         try:
-            print(f"[DEBUG] Starting CDP for {ip} - snmp={snmp is not None}")
-            if snmp is None:
-                print("[DEBUG] No SNMP - skipping CDP")
-                g.nodes[ip]["cdp_error"] = "No SNMP client"
+            print(f"[DEBUG] Starting CDP for {ip} - snmp={snmp is not None}, ssh_enabled={enable_ssh}")
+            nbs = []
+
+            if snmp is not None:
+                print("[DEBUG] Trying SNMP CDP...")
+                try:
+                    raw_nbs = get_cdp_neighbors(snmp)
+                    nbs = [asdict(nb) if is_dataclass(nb) else nb.__dict__ for nb in raw_nbs]
+                    print(f"[DEBUG] SNMP CDP returned {len(nbs)} neighbors")
+                except Exception as e:
+                    print(f"[DEBUG] SNMP CDP failed: {e}")
+
+            # Fallback to SSH if SNMP CDP failed or unavailable
+            if not nbs and enable_ssh and ssh_profile is not None:
+                print("[DEBUG] SNMP CDP unavailable or failed - falling back to SSH")
+                try:
+                    ssh = SshClient(ip, ssh_profile, debug=ssh_debug)
+                    ssh.connect()
+                    results = ssh.run_commands(["show cdp neighbors detail"])
+                    cdp_raw = results.get("show cdp neighbors detail", "")
+                    parsed_neighbors = parse_cdp_neighbors_detail(cdp_raw)
+                    nbs = [asdict(n) if is_dataclass(n) else n.__dict__ for n in parsed_neighbors]
+                    ssh.close()
+                    print(f"[DEBUG] SSH CDP fallback returned {len(nbs)} neighbors")
+                except Exception as e:
+                    print(f"[DEBUG] SSH CDP fallback failed: {e}")
+
+            g.nodes[ip]["cdp_neighbors_raw"] = nbs
+
+            if not nbs:
+                print("[DEBUG] No CDP neighbors found (SNMP or SSH)")
             else:
-                nbs = get_cdp_neighbors(snmp)
-                print(f"[DEBUG] CDP neighbors fetched: {len(nbs)}")
-                g.nodes[ip]["cdp_neighbors_raw"] = _neighbors_to_dicts(nbs)
-
+                print(f"[DEBUG] CDP neighbors for {hostname} ({ip}): {len(nbs)} found")
                 for nb in nbs:
-                    remote_ip = nb.mgmt_ip
+                    # Use correct keys from CdpDetailNeighbor parser
+                    remote_ip = nb.get("mgmt_ip") or nb.get("management_ip") or nb.get("ip")
                     if not remote_ip:
-                        print(f"[DEBUG] Skipping {nb.remote_device} - no mgmt_ip")
+                        print(f"[DEBUG] Skipping neighbor {nb.get('device_id', '?')} - no remote_ip")
                         continue
 
-                    if nb.remote_device.lower().startswith("axis"):
-                        print(f"[DEBUG] Skipping Axis: {nb.remote_device}")
+                    remote_device = nb.get("device_id") or nb.get("remote_device", "?")
+                    if remote_device.lower().startswith("axis"):
+                        print(f"[DEBUG] Skipping Axis camera: {remote_device} @ {remote_ip}")
                         continue
 
-                    role_obj = classify_device("", nb.remote_device)
+                    role_obj = classify_device("", remote_device)
 
                     if remote_ip not in g:
                         g.add_node(remote_ip, **{
                             "ip": remote_ip,
-                            "hostname": nb.remote_device,
-                            "platform": nb.platform,
+                            "hostname": remote_device,
+                            "platform": nb.get("platform"),
                             "device_role": role_obj,
                         })
 
-                    edge_label = f"{nb.local_if} → {nb.remote_port}"
-                    edge_title = f"{edge_label}\nRemote: {nb.remote_device}\nPlatform: {nb.platform}"
+                    local_if = nb.get("local_interface") or nb.get("local_if", "?")
+                    remote_if = nb.get("remote_interface") or nb.get("remote_port", "?")
+                    edge_label = f"{local_if} → {remote_if}"
+                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {nb.get('platform', '?')}"
 
                     try:
                         g.add_edge(
                             ip,
                             remote_ip,
                             proto="cdp",
-                            local_if=nb.local_if,
-                            remote_if=nb.remote_port,
-                            remote_device=nb.remote_device,
-                            platform=nb.platform,
+                            local_if=local_if,
+                            remote_if=remote_if,
+                            remote_device=remote_device,
+                            platform=nb.get("platform"),
                             label=edge_label,
                             title=edge_title,
                         )
                         edges_added += 1
-                        print(f"[DEBUG] Added edge: {ip} → {remote_ip} ({edge_label})")
+                        print(f"[DEBUG] Added CDP edge: {ip} → {remote_ip} ({edge_label})")
                     except Exception as e:
-                        print(f"[ERROR] add_edge failed {ip} → {remote_ip}: {e}")
+                        print(f"[ERROR] Failed to add edge {ip} → {remote_ip}: {e}")
 
                     if remote_ip not in visited and (traverse_all or role_obj.role in traverse_roles):
                         q.append((remote_ip, depth + 1))
                         print(f"[DEBUG] Enqueued {remote_ip} at depth {depth + 1}")
 
                     if edges_added >= max_edges:
-                        print(f"[roland] max-edges reached")
+                        print(f"[roland] max-edges reached; stopping")
                         q.clear()
                         break
 
         except Exception as e:
             g.nodes[ip]["cdp_error"] = str(e)
             print(f"[roland] CDP block failed for {ip}: {type(e).__name__}: {e}")
-
+            
         steps += 1
         if state_path and steps % state_every == 0:
             _save_state(state_path, g, q, visited)

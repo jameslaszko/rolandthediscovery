@@ -274,17 +274,23 @@ def export_html(g, path: str):
                 "#66cc66"
         net.add_node(n, label=label, title=title, size=size, color=color)
 
-    # Edges with labels and tooltips
+    # Edges with labels, colors, and tooltips
     for u, v, data in g.edges(data=True):
         label = data.get("label") or _edge_label(data)
         title = data.get("title") or _edge_title(data)
+
+        link_type = data.get("link_type", "unknown")
+        color = "#ffa500" if link_type == "access" else \
+                "#97c2fc" if link_type == "trunk" else \
+                "#cccccc"  # gray for unknown
+
         net.add_edge(
             u, v,
             label=label,
             title=title,
             arrows="to",
             font={"size": 10, "align": "middle"},
-            color={"color": "#97c2fc", "highlight": "#4a8cff"}
+            color={"color": color, "highlight": "#4a8cff"}
         )
 
     net.show_buttons(filter_=["physics"])
