@@ -7,7 +7,7 @@ from roland_discovery.export.json_export import export_json
 from roland_discovery.export.dot_export import export_dot
 from roland_discovery.export.html_export import export_html
 from roland_discovery.report.summary import print_summary
-
+from roland_discovery.graph.utils import deduplicate_nodes
 
 def main():
     p = argparse.ArgumentParser()
@@ -101,6 +101,13 @@ def main():
         resume_path=args.resume,
 
     )
+
+    # === DEDUPLICATE WHILE PRESERVING ALL IPs ===
+    nodes, links, ip_to_node_lookup = deduplicate_nodes(nodes, links)
+
+    # Optional: save the lookup for documentation use
+    with open("out/ip_to_node_lookup.json", "w") as f:
+        json.dump(ip_to_node_lookup, f, indent=2)
 
     export_json(g, args.out)
     export_dot(g, args.dot)

@@ -1,0 +1,230 @@
+import paramiko
+import re
+import time
+import os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+@dataclass
+class SshProfile:
+    username: str
+    password: str
+    port: int = 22
+    timeout: int = 30               # general / overall timeout
+    connect_timeout: int = 20       # connect timeout
+    command_timeout: int = 30       # per-command read timeout (shortened for faster debug)
+    log_path: str = field(default_factory=lambda: "out/ssh-paramiko.log")
+
+def load_ssh_profile_from_env() -> Optional[SshProfile]:
+    """Load SSH credentials from environment variables (used by build.py)."""
+    user = os.getenv("ROLAND_SSH_USER")
+    pw = os.getenv("ROLAND_SSH_PASS")
+    if not user or not pw:
+        return None
+    return SshProfile(
+        username=user,
+        password=pw,
+        port=int(os.getenv("ROLAND_SSH_PORT", "22")),
+        timeout=int(os.getenv("ROLAND_SSH_TIMEOUT", "30")),
+        connect_timeout=int(os.getenv("ROLAND_SSH_CONNECT_TIMEOUT", "20")),
+        command_timeout=int(os.getenv("ROLAND_SSH_COMMAND_TIMEOUT", "30")),
+        log_path=os.getenv("ROLAND_SSH_LOG", "out/ssh-paramiko.log")
+    )
+
+class SshClient:
+    def __init__(self, host: str, profile: SshProfile, debug: bool = False):
+        self.host = host
+        self.profile = profile
+        self.debug = debug
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self._transport: Optional[paramiko.Transport] = None
+        if debug:
+            paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
+            paramiko.util.log_to_file(profile.log_path)
+
+    def _looks_like_alg_mismatch(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(kw in msg for kw in ["algorithm negotiation", "no matching", "key exchange", "host key", "mac", "cipher"])
+
+    def _connect_legacy(self):
+        if self.debug:
+            print(f"[SSH] Falling back to legacy algorithms for {self.host}")
+        transport = paramiko.Transport((self.host, self.profile.port))
+        transport.start_client(timeout=self.profile.connect_timeout)
+        # Explicit legacy preferences
+        transport.get_security_options().kex = [
+            'diffie-hellman-group-exchange-sha1',
+            'diffie-hellman-group14-sha1',
+            'diffie-hellman-group1-sha1',
+        ]
+        transport.get_security_options().key_types = ['ssh-rsa']
+        transport.get_security_options().macs = ['hmac-sha1', 'hmac-sha1-96']
+        transport.get_security_options().ciphers = [
+            'aes128-ctr', 'aes192-ctr', 'aes256-ctr',
+            'aes128-cbc', 'aes192-cbc', 'aes256-cbc', '3des-cbc'
+        ]
+        transport.auth_password(self.profile.username, self.profile.password)
+        self._transport = transport
+
+    def connect(self):
+        try:
+            self.client.connect(
+                hostname=self.host,
+                port=self.profile.port,
+                username=self.profile.username,
+                password=self.profile.password,
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=self.profile.connect_timeout,
+                banner_timeout=90,
+                auth_timeout=90,
+                disabled_algorithms=dict(pubkeys=["rsa-sha2-512", "rsa-sha2-256"]),
+            )
+            # Aggressive keepalive right after connect
+            transport = self.client.get_transport()
+            transport.set_keepalive(3)  # send every 3 seconds to prevent stall
+            if self.debug:
+                print(f"[SSH] Standard connect succeeded for {self.host}")
+        except paramiko.SSHException as e:
+            if self._looks_like_alg_mismatch(e):
+                self._connect_legacy()
+            else:
+                raise
+        if self.debug:
+            print(f"[SSH] Connected to {self.host}")
+
+    def run_commands(self, commands: List[str], disable_paging: bool = True) -> Dict[str, str]:
+        channel = None
+        try:
+            # Try xterm first (more PuTTY-like), fallback to vt220
+            try:
+                channel = self.client.invoke_shell(term='xterm', width=120, height=500)
+            except:
+                channel = self.client.invoke_shell(term='vt220', width=120, height=500)
+
+            channel.settimeout(self.profile.command_timeout)
+
+            if self.debug:
+                print(f"[SSH] Shell opened on {self.host}. Waiting for initial banner...")
+
+            # Adaptive initial drain
+            drained = ""
+            drain_start = time.time()
+            last_data_time = time.time()
+            while time.time() - drain_start < 8.0:
+                if channel.recv_ready():
+                    chunk = channel.recv(16384).decode('utf-8', errors='replace')
+                    drained += chunk
+                    last_data_time = time.time()
+                    if self.debug and chunk.strip():
+                        print(f"[SSH initial drain chunk] {repr(chunk[:200])}...")
+                else:
+                    if time.time() - last_data_time > 1.0:
+                        break
+                    time.sleep(0.1)
+
+            if self.debug:
+                print(f"[SSH] Drained {len(drained)} bytes initial output.")
+
+            has_prompt = "#" in drained or ">" in drained
+
+            if has_prompt:
+                if self.debug:
+                    print(f"[SSH] Privileged prompt already detected — skipping enable")
+            else:
+                if self.debug:
+                    print(f"[SSH] No prompt — sending wake")
+                channel.send("\n\n")
+                time.sleep(1.5)
+                _ = self._read_until_prompt(channel, max_wait=20.0)
+
+            if disable_paging:
+                if self.debug:
+                    print(f"[SSH] Disabling paging on {self.host} (minimal - no flush)")
+                channel.send("terminal length 0\n")
+                time.sleep(8.0)
+                channel.recv(65536)  # large buffer to clear any pending data
+
+                # Skip terminal width and dummy flush — often buggy on old IOS
+
+            results = {}
+            transport = self.client.get_transport()
+
+            for cmd in commands:
+                if self.debug:
+                    print(f"[SSH shell → {self.host}] Sending: {cmd}")
+                channel.send(cmd + "\n")
+                time.sleep(1.5)  # slightly longer send delay
+
+                output = self._read_until_prompt(channel)
+
+                # Double nudge to force PTY recovery
+                if output:
+                    channel.send("\n\n")  # two enters
+                    time.sleep(2.0)
+                    nudge1 = channel.recv(32768).decode('utf-8', errors='replace')
+                    output += nudge1
+                    if self.debug:
+                        print(f"[SSH nudge1 after {cmd}] {repr(nudge1[:150])}")
+
+                    time.sleep(1.0)
+                    nudge2 = channel.recv(16384).decode('utf-8', errors='replace')
+                    output += nudge2
+                    if self.debug:
+                        print(f"[SSH nudge2 after {cmd}] {repr(nudge2[:150])}")
+
+                # Extra low-level keepalive
+                if transport and transport.is_active():
+                    transport.send_ignore()
+
+                if output.startswith(cmd):
+                    output = output[len(cmd):].lstrip()
+                output = re.sub(r'\r\n?|\n$', '', output).strip()
+                results[cmd] = output
+
+                if self.debug:
+                    print(f"[SSH shell ← {self.host}] Got {len(output)} chars for '{cmd}'")
+
+            return results
+
+        except Exception as e:
+            if self.debug:
+                print(f"[SSH shell error on {self.host}]: {e}")
+            raise
+        finally:
+            if channel:
+                try:
+                    channel.close()
+                except:
+                    pass
+
+    def _read_until_prompt(self, channel: paramiko.Channel, max_wait: float = 120.0) -> str:
+        output = ""
+        start = time.time()
+        # More robust prompt detection (handles #, >, (config)#, etc.)
+        prompt_re = re.compile(r'[\r\n]([\w\-]+(?:\([^\)]+\))?[>#]\s*)$', re.M | re.I)
+
+        while time.time() - start < max_wait:
+            if channel.recv_ready():
+                chunk = channel.recv(32768).decode('utf-8', errors='replace')  # larger chunk
+                output += chunk
+                if self.debug and len(chunk.strip()) > 0:
+                    print(f"[SSH recv chunk] {repr(chunk[:150])}...")
+            if prompt_re.search(output):
+                match = prompt_re.search(output)
+                if match:
+                    # Return everything before the prompt
+                    return output[:match.start()].rstrip()
+                return output.rstrip()
+            time.sleep(0.05)  # faster polling
+
+        if self.debug:
+            print(f"[SSH read timeout on {self.host}] Last output (truncated): {output[-400:]}")
+        raise TimeoutError(f"Timeout reading from {self.host} after {max_wait}s")
+
+    def close(self):
+        if self.client:
+            self.client.close()
+        if self._transport:
+            self._transport.close()

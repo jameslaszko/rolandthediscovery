@@ -17,6 +17,46 @@ from roland_discovery.snmp.client import SnmpV2cClient
 from roland_discovery.snmp.system import get_sysdescr, get_sysname
 from roland_discovery.snmp.ipmib import load_interface_ips, load_ip_to_ifname
 
+def deduplicate_nodes(nodes: list, links: list) -> tuple[list, list, dict]:
+    """
+    Merge nodes by hostname (primary key) while preserving:
+      - ALL IPs (VLAN, loopback, mgmt, etc.)
+      - Full ip_to_ifname mapping
+    Returns: (clean_nodes, clean_links, ip_to_node_lookup)
+    """
+    by_key = {}
+    for node in nodes:
+        key = node.get("hostname") or node["id"]          # hostname is authoritative
+        if key not in by_key:
+            by_key[key] = node.copy()
+            by_key[key]["ips"] = list(set(node.get("ips", [])))
+            by_key[key]["ip_to_ifname"] = dict(node.get("ip_to_ifname", {}))
+            by_key[key]["id"] = key                       # canonical ID = hostname
+        else:
+            # Merge IPs & mappings from any discovery path
+            existing = by_key[key]
+            existing["ips"].extend(node.get("ips", []))
+            existing["ips"] = list(dict.fromkeys(existing["ips"]))   # preserve order
+            existing["ip_to_ifname"].update(node.get("ip_to_ifname", {}))
+
+    # Remap all links to use the canonical hostname key
+    clean_links = []
+    for link in links:
+        src_node = next((n for n in nodes if n["id"] == link["source"]), None)
+        dst_node = next((n for n in nodes if n["id"] == link["target"]), None)
+        link["source"] = src_node.get("hostname") or link["source"] if src_node else link["source"]
+        link["target"] = dst_node.get("hostname") or link["target"] if dst_node else link["target"]
+        clean_links.append(link)
+
+    clean_nodes = list(by_key.values())
+
+    # Bonus: lookup table so any IP → correct node (super useful for docs)
+    ip_to_node = {}
+    for node in clean_nodes:
+        for ip in node.get("ips", []):
+            ip_to_node[ip] = node["id"]          # hostname or original ID
+
+    return clean_nodes, clean_links, ip_to_node
 
 def _snmp_factory(profile: Any, ip: str):
     """Return an SNMP client for `ip`."""
@@ -228,10 +268,10 @@ def build_topology(
                 "ip_to_ifname": ip_to_ifname,
             }
         )
-        if depth > 0:   
-            print(f"[roland] Skipping SSH on depth={depth} node={ip} (known timeout issue)")
-            g.nodes[ip].setdefault("ssh_status", "skipped-depth")
-            continue  # skip SSH block
+#        if depth > 0:   
+#            print(f"[roland] Skipping SSH on depth={depth} node={ip} (known timeout issue)")
+#            g.nodes[ip].setdefault("ssh_status", "skipped-depth")
+#            continue  # skip SSH block
         # SSH enrichment
         if enable_ssh and ssh_profile is not None:
             from roland_discovery.ssh.enrich import (
@@ -274,6 +314,7 @@ def build_topology(
                         "ssh_switching": switching,
                     }
                 )
+
             except Exception as e:
                 err = f"{type(e).__name__}: {e!r}" if not str(e) else str(e)
                 g.nodes[ip].update(
