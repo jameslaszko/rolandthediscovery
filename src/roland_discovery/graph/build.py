@@ -315,74 +315,70 @@ def build_topology(
 
         try:
 
-#DEBUG
+        # CDP neighbors → enqueue + add edges
+        try:
             print(f"[DEBUG] Starting CDP discovery for {hostname} ({ip}) - snmp: {snmp is not None}")
             if snmp is None:
                 print("[DEBUG] SNMP client is None - skipping CDP")
-                raise ValueError("SNMP client not initialized")            
-#/DEBUG
-
-            nbs = get_cdp_neighbors(snmp)
-            print(f"[DEBUG] get_cdp_neighbors returned {len(nbs)} neighbors")
-            g.nodes[ip]["cdp_neighbors_raw"] = _neighbors_to_dicts(nbs)
-            print(f"[DEBUG] CDP neighbors for {hostname} ({ip}): {len(nbs)} found")
-
-            if not nbs:
-                print("[DEBUG] No CDP neighbors returned")
+                g.nodes[ip]["cdp_error"] = "SNMP client not initialized"
             else:
-                print(f"[DEBUG] CDP neighbors for {hostname} ({ip}): {len(nbs)} found")
-                for nb in nbs:
-                    remote_ip = nb.mgmt_ip
-                    if not remote_ip:
-                        print(f"[DEBUG] Skipping neighbor {nb.remote_device} - no mgmt_ip")
-                        continue
+                nbs = get_cdp_neighbors(snmp)
+                print(f"[DEBUG] get_cdp_neighbors returned {len(nbs)} neighbors")
+                g.nodes[ip]["cdp_neighbors_raw"] = _neighbors_to_dicts(nbs)
 
-                    if nb.remote_device.lower().startswith("axis"):
-                        print(f"[DEBUG] Skipping Axis camera: {nb.remote_device} @ {remote_ip}")
-                        continue
+                if not nbs:
+                    print("[DEBUG] No CDP neighbors returned - CDP may be disabled or SNMP OID failed")
+                else:
+                    print(f"[DEBUG] CDP neighbors for {hostname} ({ip}): {len(nbs)} found")
+                    for nb in nbs:
+                        remote_ip = nb.mgmt_ip
+                        if not remote_ip:
+                            print(f"[DEBUG] Skipping neighbor {nb.remote_device} - no mgmt_ip")
+                            continue
 
-                    role_obj = classify_device("", nb.remote_device)
-                    print(f"[DEBUG classify] {nb.remote_device} → role: {role_obj} (traverse? {role_obj.role in traverse_roles})")
-                    print(f"Considering edge from {hostname} ({ip}) → "
-                          f"{nb.remote_device} @ {remote_ip} "
-                          f"(local_if={nb.local_if}, remote_port={nb.remote_port}, platform={nb.platform})")
+                        if nb.remote_device.lower().startswith("axis"):
+                            print(f"[DEBUG] Skipping Axis camera: {nb.remote_device} @ {remote_ip}")
+                            continue
 
-                    if remote_ip not in g:
-                        g.add_node(remote_ip, **{
-                            "ip": remote_ip,
-                            "hostname": nb.remote_device,
-                            "platform": nb.platform,
-                            "device_role": role_obj,
-                        })
+                        role_obj = classify_device("", nb.remote_device)
 
-                    edge_label = f"{nb.local_if} → {nb.remote_port}"
-                    edge_title = f"{edge_label}\nRemote: {nb.remote_device}\nPlatform: {nb.platform}"
+                        if remote_ip not in g:
+                            g.add_node(remote_ip, **{
+                                "ip": remote_ip,
+                                "hostname": nb.remote_device,
+                                "platform": nb.platform,
+                                "device_role": role_obj,
+                            })
 
-                    try:
-                        g.add_edge(
-                            ip,
-                            remote_ip,
-                            proto="cdp",
-                            local_if=nb.local_if,
-                            remote_if=nb.remote_port,
-                            remote_device=nb.remote_device,
-                            platform=nb.platform,
-                            label=edge_label,
-                            title=edge_title,
-                        )
-                        edges_added += 1
-                        print(f"[DEBUG] Added CDP edge: {ip} → {remote_ip} ({edge_label})")
-                    except Exception as e:
-                        print(f"[ERROR] Failed to add edge {ip} → {remote_ip}: {e}")
+                        edge_label = f"{nb.local_if} → {nb.remote_port}"
+                        edge_title = f"{edge_label}\nRemote: {nb.remote_device}\nPlatform: {nb.platform}"
 
-                    if remote_ip not in visited and (traverse_all or role_obj.role in traverse_roles):
-                        q.append((remote_ip, depth + 1))
-                        print(f"[DEBUG] Enqueued {remote_ip} at depth {depth + 1}")
+                        try:
+                            g.add_edge(
+                                ip,
+                                remote_ip,
+                                proto="cdp",
+                                local_if=nb.local_if,
+                                remote_if=nb.remote_port,
+                                remote_device=nb.remote_device,
+                                platform=nb.platform,
+                                label=edge_label,
+                                title=edge_title,
+                            )
+                            edges_added += 1
+                            print(f"[DEBUG] Added CDP edge: {ip} → {remote_ip} ({edge_label})")
+                        except Exception as e:
+                            print(f"[ERROR] Failed to add edge {ip} → {remote_ip}: {e}")
 
-                    if edges_added >= max_edges:
-                        print(f"[roland] max-edges reached; stopping")
-                        q.clear()
-                        break
+                        if remote_ip not in visited and (traverse_all or role_obj.role in traverse_roles):
+                            q.append((remote_ip, depth + 1))
+                            print(f"[DEBUG] Enqueued {remote_ip} at depth {depth + 1}")
+
+                        if edges_added >= max_edges:
+                            print(f"[roland] max-edges reached; stopping")
+                            q.clear()
+                            break
+
         except Exception as e:
             g.nodes[ip]["cdp_error"] = str(e)
             print(f"[roland] CDP failed for {ip}: {type(e).__name__}: {e}")
