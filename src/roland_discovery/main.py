@@ -1,12 +1,13 @@
 import argparse
 import os
-
+import json
 from roland_discovery.config import SnmpProfile
 from roland_discovery.graph.build import build_topology
 from roland_discovery.export.json_export import export_json
 from roland_discovery.export.dot_export import export_dot
 from roland_discovery.export.html_export import export_html
 from roland_discovery.report.summary import print_summary
+# Assuming deduplicate_nodes is in graph/utils.py — import it here
 from roland_discovery.graph.utils import deduplicate_nodes
 
 def main():
@@ -18,20 +19,16 @@ def main():
     p.add_argument("--max-neighbors-per-node", type=int, default=200, help="Cap neighbors processed per device (protects from CDP floods)")
     p.add_argument("--state", default=None, help="Write discovery state JSON here (for resume)")
     p.add_argument("--resume", default=None, help="Resume discovery from a prior --state file")
-
     p.add_argument("--ssh", action="store_true", help="Enable SSH enrichment (best effort)")
     p.add_argument("--ssh-user", default=None, help="SSH username (or env ROLAND_SSH_USER)")
     p.add_argument("--ssh-pass", default=None, help="SSH password (or env ROLAND_SSH_PASS)")
     p.add_argument("--ssh-timeout", type=int, default=10, help="SSH timeout seconds")
     p.add_argument("--ssh-port", type=int, default=22, help="SSH TCP port")
-
     p.add_argument(
         "--ssh-debug",
         action="store_true",
         help="Print SSH algorithm/options attempted (helps diagnose legacy Cisco SSH negotiation)",
     )
-
-
     p.add_argument("--l2", action="store_true", help="Collect L2 MAC counts (best-effort; may require community@vlan)")
     p.add_argument("--max-nodes", type=int, default=250, help="Hard stop for traversed mgmt IP nodes")
     p.add_argument("--include-subnet", action="append", default=[], help="CIDR to allow traversal (repeatable)")
@@ -53,6 +50,7 @@ def main():
         raise SystemExit("SNMP community required (or set ROLAND_SNMP_COMMUNITY)")
 
     profile = SnmpProfile(community=args.community)
+
     if args.resume and not os.path.exists(args.resume):
         raise SystemExit(f"resume file not found: {args.resume}")
 
@@ -61,7 +59,6 @@ def main():
     ssh_pass_cli = (args.ssh_pass or "").strip()
     ssh_user_env = (os.getenv("ROLAND_SSH_USER", "") or "").strip()
     ssh_pass_env = (os.getenv("ROLAND_SSH_PASS", "") or "").strip()
-
     ssh_user = ssh_user_cli or ssh_user_env
     ssh_pass = ssh_pass_cli or ssh_pass_env
     ssh_source = "cli" if (ssh_user_cli and ssh_pass_cli) else ("env" if (ssh_user_env and ssh_pass_env) else "missing")
@@ -75,6 +72,8 @@ def main():
             )
         print(f"[roland] ssh enabled (credentials source: {ssh_source})")
 
+    # Build the topology graph
+     # Build the topology graph
     g = build_topology(
         args.seed,
         profile,
@@ -99,16 +98,26 @@ def main():
         max_neighbors_per_node=args.max_neighbors_per_node,
         state_path=args.state,
         resume_path=args.resume,
-
     )
 
-    # === DEDUPLICATE WHILE PRESERVING ALL IPs ===
-    nodes, links, ip_to_node_lookup = deduplicate_nodes(nodes, links)
+    # Extract nodes and links safely (adjust attribute names if needed)
+    nodes = getattr(g, 'nodes', []) or getattr(g, 'node_list', []) or []
+    links = getattr(g, 'links', []) or getattr(g, 'edges', []) or getattr(g, 'edge_list', []) or []
 
-    # Optional: save the lookup for documentation use
-    with open("out/ip_to_node_lookup.json", "w") as f:
-        json.dump(ip_to_node_lookup, f, indent=2)
+    if not nodes or not links:
+        print("[WARNING] No nodes or links returned from build_topology — skipping deduplication")
+    else:
+        print(f"[INFO] Deduplicating {len(nodes)} nodes and {len(links)} links...")
+        nodes, links, ip_to_node_lookup = deduplicate_nodes(nodes, links)
 
+        # Save IP → node lookup for documentation
+        os.makedirs("out", exist_ok=True)
+        lookup_path = "out/ip_to_node_lookup.json"
+        with open(lookup_path, "w") as f:
+            json.dump(ip_to_node_lookup, f, indent=2)
+        print(f"[INFO] Saved IP → node lookup: {lookup_path}")
+
+    # Export (update export functions if they need nodes/links instead of g)
     export_json(g, args.out)
     export_dot(g, args.dot)
     if args.html:
@@ -118,3 +127,6 @@ def main():
         print_summary(g)
 
     print("Discovery complete")
+
+if __name__ == "__main__":
+    main()
