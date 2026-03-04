@@ -279,42 +279,93 @@ def parse_show_interfaces_switchport(text: str) -> Dict[str, Dict[str, Any]]:
 
     return out
     
-def collect_switching_catalog(
-    ssh: Optional[SshClient] = None,
-    results: Optional[Dict[str, str]] = None,
-    debug: bool = False
-) -> Dict[str, Any]:
-    if results is None:
-        results = {}
-
-    # Force use of pre-fetched if provided; no live exec fallback
-    def get_output(cmd: str) -> str:
-        if cmd in results:
-            out = results[cmd].strip()
-            if debug:
-                print(f"[enrich] Using pre-fetched '{cmd}' ({len(out)} chars)")
-            return out
-        if debug:
-            print(f"[enrich] No pre-fetched output for '{cmd}'")
-        return ""
-
-    vlan_txt   = get_output("show vlan brief") or get_output("show vlan")
-    trunk_txt  = get_output("show interfaces trunk") or get_output("show interface trunk")
-    sw_txt     = get_output("show interfaces switchport")
-
+def collect_switching_catalog(ssh=None, results=None):
+    """
+    Parse show vlan brief, show interfaces trunk, show interfaces switchport
+    to build a switching catalog (vlans, trunks, switchports).
+    """
     catalog = {
-        "commands": {
-            "vlan": "show vlan brief" if vlan_txt else "",
-            "trunk": "show interfaces trunk" if trunk_txt else "",
-            "switchport": "show interfaces switchport" if sw_txt else "",
-        },
-        "vlans": parse_show_vlan_brief(vlan_txt) if vlan_txt else {},
-        "trunks": parse_show_interfaces_trunk(trunk_txt) if trunk_txt else {},
-        "switchports": parse_show_interfaces_switchport(sw_txt) if sw_txt else {},
+        "vlans": {},
+        "trunks": {},
+        "switchports": {},
     }
 
-    if debug:
-        print(f"[enrich] Catalog: vlans={len(catalog['vlans'])}, trunks={len(catalog['trunks'])}, switchports={len(catalog['switchports'])}")
+    # Parse show vlan brief (if available)
+    vlan_output = results.get("show vlan brief", "")
+    if vlan_output:
+        for line in vlan_output.splitlines():
+            line = line.strip()
+            if not line or line.startswith("---") or line.startswith("VLAN"):
+                continue
+            parts = re.split(r'\s{2,}', line)
+            if len(parts) < 3:
+                continue
+            vlan_id = parts[0]
+            name = parts[1]
+            status = parts[2]
+            ports = " ".join(parts[3:]) if len(parts) > 3 else ""
+            catalog["vlans"][vlan_id] = {
+                "name": name,
+                "status": status,
+                "ports": ports,
+            }
+
+    # Parse show interfaces trunk (if available)
+    trunk_output = results.get("show interfaces trunk", "")
+    if trunk_output:
+        for line in trunk_output.splitlines():
+            line = line.strip()
+            if not line or line.startswith("Port") or line.startswith("---"):
+                continue
+            parts = re.split(r'\s{2,}', line)
+            if len(parts) < 5:
+                continue
+            port = parts[0]
+            mode = parts[1]
+            encap = parts[2]
+            status = parts[3]
+            vlan_list = parts[4]
+            catalog["trunks"][port] = {
+                "mode": mode,
+                "encap": encap,
+                "status": status,
+                "allowed_vlans": vlan_list,
+            }
+
+    # Parse show interfaces switchport (main source for modes)
+    swp_output = results.get("show interfaces switchport", "")
+    if swp_output:
+        current_port = None
+        current_data = {}
+        for line in swp_output.splitlines():
+            line = line.rstrip()
+            if line.startswith("Name:"):
+                if current_port:
+                    catalog["switchports"][current_port] = current_data
+                current_port = line.split(":", 1)[1].strip()
+                current_data = {}
+            elif current_port:
+                if "Switchport:" in line:
+                    current_data["switchport_enabled"] = "enabled" in line.lower()
+                elif "Administrative Mode:" in line:
+                    mode = line.split(":", 1)[1].strip().lower()
+                    current_data["mode"] = mode
+                elif "Operational Mode:" in line:
+                    current_data["operational_mode"] = line.split(":", 1)[1].strip().lower()
+                elif "Access Mode VLAN:" in line:
+                    vlan = line.split(":", 1)[1].strip()
+                    current_data["access_vlan"] = vlan
+                elif "Trunking Native Mode VLAN:" in line:
+                    vlan = line.split(":", 1)[1].strip()
+                    current_data["native_vlan"] = vlan
+                elif "Trunking VLANs Enabled:" in line:
+                    vlans = line.split(":", 1)[1].strip()
+                    current_data["trunk_allowed_vlans"] = vlans
+                elif "Voice VLAN:" in line:
+                    current_data["voice_vlan"] = line.split(":", 1)[1].strip()
+
+        if current_port:
+            catalog["switchports"][current_port] = current_data
 
     return catalog
     
