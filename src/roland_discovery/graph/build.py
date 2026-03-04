@@ -202,202 +202,202 @@ def build_topology(
     edges_added = 0
     steps = 0
 
-        while q:
-        ip, depth = q.popleft()
-        if ip in visited:
-            continue
-        if len(visited) >= max_nodes:
-            print(f"[roland] max-nodes reached ({max_nodes}); stopping")
-            break
-        visited.add(ip)
-        print(f"[roland] processing depth={depth} node={ip} visited={len(visited)} queue={len(q)}")
+    while q:
+    ip, depth = q.popleft()
+    if ip in visited:
+        continue
+    if len(visited) >= max_nodes:
+        print(f"[roland] max-nodes reached ({max_nodes}); stopping")
+        break
+    visited.add(ip)
+    print(f"[roland] processing depth={depth} node={ip} visited={len(visited)} queue={len(q)}")
 
-        if ip not in g:
-            g.add_node(ip, ip=ip)
+    if ip not in g:
+        g.add_node(ip, ip=ip)
 
-        poll_status = "ok"
-        poll_error = ""
-        sysname = ""
-        sysdescr = ""
-        ip_to_ifname: Dict[str, str] = {}
-        ips = set()
-        snmp = None
+    poll_status = "ok"
+    poll_error = ""
+    sysname = ""
+    sysdescr = ""
+    ip_to_ifname: Dict[str, str] = {}
+    ips = set()
+    snmp = None
 
+    try:
+        snmp = _snmp_factory(profile, ip)
+        sysname = get_sysname(snmp) or ""
+        sysdescr = get_sysdescr(snmp) or ""
+        ip_to_ifname = load_ip_to_ifname(snmp)
+        ips = load_interface_ips(snmp)
+    except Exception as e:
+        poll_status = "failed"
+        poll_error = str(e)
+        print(f"[DEBUG] SNMP poll failed for {ip}: {poll_error}")
+
+    hostname = (sysname or ip).strip()
+    role = classify_device(sysdescr or "", hostname)
+    print(f"[DEBUG classify seed] {hostname} → sysdescr: {sysdescr[:100]} → role: {role}")
+
+    g.nodes[ip].update({
+        "hostname": hostname,
+        "sysdescr": sysdescr,
+        "device_role": role,
+        "poll_status": poll_status,
+        "snmp_error": poll_error,
+        "ips": sorted(ips),
+        "ip_to_ifname": ip_to_ifname,
+    })
+
+    # SSH enrichment (unchanged)
+    if enable_ssh and ssh_profile is not None:
+        from roland_discovery.ssh.enrich import (
+            parse_show_ip_interface_brief,
+            parse_show_arp,
+            parse_cdp_neighbors_detail,
+            collect_switching_catalog,
+        )
         try:
-            snmp = _snmp_factory(profile, ip)
-            sysname = get_sysname(snmp) or ""
-            sysdescr = get_sysdescr(snmp) or ""
-            ip_to_ifname = load_ip_to_ifname(snmp)
-            ips = load_interface_ips(snmp)
+            print(f"[roland] ssh enrich node={ip}")
+            ssh = SshClient(ip, ssh_profile, debug=ssh_debug)
+            ssh.connect()
+            results = ssh.run_commands([
+                "show version", "show ip interface brief", "show arp",
+                "show cdp neighbors detail", "show vlan brief",
+                "show interfaces trunk", "show interfaces switchport",
+            ])
+            ip_int = parse_show_ip_interface_brief(results.get("show ip interface brief", ""))
+            arp = parse_show_arp(results.get("show arp", ""))
+            cdp_detail_raw = results.get("show cdp neighbors detail", "")
+            cdp_detail = [asdict(x) for x in parse_cdp_neighbors_detail(cdp_detail_raw)]
+            switching = collect_switching_catalog(ssh=None, results=results)
+            ssh.close()
+
+            g.nodes[ip].update({
+                "ssh_status": "ok",
+                "ssh_error": "",
+                "ssh_source": ssh_source,
+                "ssh_ip_interface_brief": ip_int,
+                "ssh_arp": arp,
+                "ssh_cdp_neighbors_detail": cdp_detail,
+                "ssh_switching": switching,
+            })
         except Exception as e:
-            poll_status = "failed"
-            poll_error = str(e)
-            print(f"[DEBUG] SNMP poll failed for {ip}: {poll_error}")
+            err = f"{type(e).__name__}: {e!r}" if not str(e) else str(e)
+            g.nodes[ip].update({
+                "ssh_status": "failed",
+                "ssh_error": err,
+                "ssh_source": ssh_source,
+            })
+            print(f"[roland] WARN: ssh failed node={ip}: {err}")
+    else:
+        g.nodes[ip].setdefault("ssh_status", "skipped")
+        g.nodes[ip].setdefault("ssh_error", "")
+        g.nodes[ip].setdefault("ssh_source", ssh_source)
 
-        hostname = (sysname or ip).strip()
-        role = classify_device(sysdescr or "", hostname)
-        print(f"[DEBUG classify seed] {hostname} → sysdescr: {sysdescr[:100]} → role: {role}")
-
-        g.nodes[ip].update({
-            "hostname": hostname,
-            "sysdescr": sysdescr,
-            "device_role": role,
-            "poll_status": poll_status,
-            "snmp_error": poll_error,
-            "ips": sorted(ips),
-            "ip_to_ifname": ip_to_ifname,
-        })
-
-        # SSH enrichment (unchanged)
-        if enable_ssh and ssh_profile is not None:
-            from roland_discovery.ssh.enrich import (
-                parse_show_ip_interface_brief,
-                parse_show_arp,
-                parse_cdp_neighbors_detail,
-                collect_switching_catalog,
-            )
-            try:
-                print(f"[roland] ssh enrich node={ip}")
-                ssh = SshClient(ip, ssh_profile, debug=ssh_debug)
-                ssh.connect()
-                results = ssh.run_commands([
-                    "show version", "show ip interface brief", "show arp",
-                    "show cdp neighbors detail", "show vlan brief",
-                    "show interfaces trunk", "show interfaces switchport",
-                ])
-                ip_int = parse_show_ip_interface_brief(results.get("show ip interface brief", ""))
-                arp = parse_show_arp(results.get("show arp", ""))
-                cdp_detail_raw = results.get("show cdp neighbors detail", "")
-                cdp_detail = [asdict(x) for x in parse_cdp_neighbors_detail(cdp_detail_raw)]
-                switching = collect_switching_catalog(ssh=None, results=results)
-                ssh.close()
-
-                g.nodes[ip].update({
-                    "ssh_status": "ok",
-                    "ssh_error": "",
-                    "ssh_source": ssh_source,
-                    "ssh_ip_interface_brief": ip_int,
-                    "ssh_arp": arp,
-                    "ssh_cdp_neighbors_detail": cdp_detail,
-                    "ssh_switching": switching,
-                })
-            except Exception as e:
-                err = f"{type(e).__name__}: {e!r}" if not str(e) else str(e)
-                g.nodes[ip].update({
-                    "ssh_status": "failed",
-                    "ssh_error": err,
-                    "ssh_source": ssh_source,
-                })
-                print(f"[roland] WARN: ssh failed node={ip}: {err}")
+    # Orphan SVI detection
+    try:
+        switching = g.nodes[ip].get("ssh_switching") or {}
+        trunks = switching.get("trunks", {}) if isinstance(switching, dict) else {}
+        uplink_ports: Set[str] = {ed.get("local_if") for _, _, ed in g.edges(ip, data=True) if ed.get("local_if")}
+        uplink_trunks = []
+        for p in sorted(uplink_ports):
+            if p in trunks:
+                d = dict(trunks[p])
+                d["port"] = p
+                uplink_trunks.append(d)
+        if uplink_trunks and ip_to_ifname:
+            g.nodes[ip]["orphan_svis"] = _orphan_svis(ip_to_ifname, uplink_trunks)
         else:
-            g.nodes[ip].setdefault("ssh_status", "skipped")
-            g.nodes[ip].setdefault("ssh_error", "")
-            g.nodes[ip].setdefault("ssh_source", ssh_source)
-
-        # Orphan SVI detection
-        try:
-            switching = g.nodes[ip].get("ssh_switching") or {}
-            trunks = switching.get("trunks", {}) if isinstance(switching, dict) else {}
-            uplink_ports: Set[str] = {ed.get("local_if") for _, _, ed in g.edges(ip, data=True) if ed.get("local_if")}
-            uplink_trunks = []
-            for p in sorted(uplink_ports):
-                if p in trunks:
-                    d = dict(trunks[p])
-                    d["port"] = p
-                    uplink_trunks.append(d)
-            if uplink_trunks and ip_to_ifname:
-                g.nodes[ip]["orphan_svis"] = _orphan_svis(ip_to_ifname, uplink_trunks)
-            else:
-                g.nodes[ip]["orphan_svis"] = []
-        except Exception as e:
-            print(f"[roland] orphan_svis calc failed for {ip}: {e}")
             g.nodes[ip]["orphan_svis"] = []
+    except Exception as e:
+        print(f"[roland] orphan_svis calc failed for {ip}: {e}")
+        g.nodes[ip]["orphan_svis"] = []
 
-        if poll_status != "ok" or depth >= max_depth:
-            print(f"[DEBUG] Skipping deeper traversal for {ip} (poll={poll_status}, depth={depth} >= max_depth={max_depth})")
-            continue
+    if poll_status != "ok" or depth >= max_depth:
+        print(f"[DEBUG] Skipping deeper traversal for {ip} (poll={poll_status}, depth={depth} >= max_depth={max_depth})")
+        continue
 
-        # CDP neighbors
-        try:
-            print(f"[DEBUG] Starting CDP for {ip} - snmp={snmp is not None}")
-            if snmp is None:
-                print("[DEBUG] No SNMP - skipping CDP")
-                g.nodes[ip]["cdp_error"] = "No SNMP client"
-            else:
-                nbs = get_cdp_neighbors(snmp)
-                print(f"[DEBUG] CDP neighbors fetched: {len(nbs)}")
-                g.nodes[ip]["cdp_neighbors_raw"] = _neighbors_to_dicts(nbs)
+    # CDP neighbors
+    try:
+        print(f"[DEBUG] Starting CDP for {ip} - snmp={snmp is not None}")
+        if snmp is None:
+            print("[DEBUG] No SNMP - skipping CDP")
+            g.nodes[ip]["cdp_error"] = "No SNMP client"
+        else:
+            nbs = get_cdp_neighbors(snmp)
+            print(f"[DEBUG] CDP neighbors fetched: {len(nbs)}")
+            g.nodes[ip]["cdp_neighbors_raw"] = _neighbors_to_dicts(nbs)
 
-                for nb in nbs:
-                    remote_ip = nb.mgmt_ip
-                    if not remote_ip:
-                        print(f"[DEBUG] Skipping {nb.remote_device} - no mgmt_ip")
-                        continue
+            for nb in nbs:
+                remote_ip = nb.mgmt_ip
+                if not remote_ip:
+                    print(f"[DEBUG] Skipping {nb.remote_device} - no mgmt_ip")
+                    continue
 
-                    if nb.remote_device.lower().startswith("axis"):
-                        print(f"[DEBUG] Skipping Axis: {nb.remote_device}")
-                        continue
+                if nb.remote_device.lower().startswith("axis"):
+                    print(f"[DEBUG] Skipping Axis: {nb.remote_device}")
+                    continue
 
-                    role_obj = classify_device("", nb.remote_device)
+                role_obj = classify_device("", nb.remote_device)
 
-                    if remote_ip not in g:
-                        g.add_node(remote_ip, **{
-                            "ip": remote_ip,
-                            "hostname": nb.remote_device,
-                            "platform": nb.platform,
-                            "device_role": role_obj,
-                        })
+                if remote_ip not in g:
+                    g.add_node(remote_ip, **{
+                        "ip": remote_ip,
+                        "hostname": nb.remote_device,
+                        "platform": nb.platform,
+                        "device_role": role_obj,
+                    })
 
-                    edge_label = f"{nb.local_if} → {nb.remote_port}"
-                    edge_title = f"{edge_label}\nRemote: {nb.remote_device}\nPlatform: {nb.platform}"
+                edge_label = f"{nb.local_if} → {nb.remote_port}"
+                edge_title = f"{edge_label}\nRemote: {nb.remote_device}\nPlatform: {nb.platform}"
 
-                    try:
-                        g.add_edge(
-                            ip,
-                            remote_ip,
-                            proto="cdp",
-                            local_if=nb.local_if,
-                            remote_if=nb.remote_port,
-                            remote_device=nb.remote_device,
-                            platform=nb.platform,
-                            label=edge_label,
-                            title=edge_title,
-                        )
-                        edges_added += 1
-                        print(f"[DEBUG] Added edge: {ip} → {remote_ip} ({edge_label})")
-                    except Exception as e:
-                        print(f"[ERROR] add_edge failed {ip} → {remote_ip}: {e}")
+                try:
+                    g.add_edge(
+                        ip,
+                        remote_ip,
+                        proto="cdp",
+                        local_if=nb.local_if,
+                        remote_if=nb.remote_port,
+                        remote_device=nb.remote_device,
+                        platform=nb.platform,
+                        label=edge_label,
+                        title=edge_title,
+                    )
+                    edges_added += 1
+                    print(f"[DEBUG] Added edge: {ip} → {remote_ip} ({edge_label})")
+                except Exception as e:
+                    print(f"[ERROR] add_edge failed {ip} → {remote_ip}: {e}")
 
-                    if remote_ip not in visited and (traverse_all or role_obj.role in traverse_roles):
-                        q.append((remote_ip, depth + 1))
-                        print(f"[DEBUG] Enqueued {remote_ip} at depth {depth + 1}")
+                if remote_ip not in visited and (traverse_all or role_obj.role in traverse_roles):
+                    q.append((remote_ip, depth + 1))
+                    print(f"[DEBUG] Enqueued {remote_ip} at depth {depth + 1}")
 
-                    if edges_added >= max_edges:
-                        print(f"[roland] max-edges reached")
-                        q.clear()
-                        break
+                if edges_added >= max_edges:
+                    print(f"[roland] max-edges reached")
+                    q.clear()
+                    break
 
-        except Exception as e:
-            g.nodes[ip]["cdp_error"] = str(e)
-            print(f"[roland] CDP block failed for {ip}: {type(e).__name__}: {e}")
+    except Exception as e:
+        g.nodes[ip]["cdp_error"] = str(e)
+        print(f"[roland] CDP block failed for {ip}: {type(e).__name__}: {e}")
 
-        steps += 1
-        if state_path and steps % state_every == 0:
-            _save_state(state_path, g, q, visited)
+    steps += 1
+    if state_path and steps % state_every == 0:
+        _save_state(state_path, g, q, visited)
 
-    print("[INFO] Running final hostname deduplication...")
-    g = deduplicate_graph(g)
+print("[INFO] Running final hostname deduplication...")
+g = deduplicate_graph(g)
 
-    print(f"[DEBUG] Final graph: {len(g.nodes)} nodes, {len(g.edges)} edges")
+print(f"[DEBUG] Final graph: {len(g.nodes)} nodes, {len(g.edges)} edges")
 
-    seed_node = g.nodes.get(seed, {})
-    orphans = seed_node.get("orphan_svis", [])
-    if orphans:
-        print("\nOrphan SVIs detected on seed device:")
-        for o in orphans:
-            print(f" - IP: {o.get('ip','?')} VLAN: {o.get('vlan','?')} Iface: {o.get('ifname','?')}")
+seed_node = g.nodes.get(seed, {})
+orphans = seed_node.get("orphan_svis", [])
+if orphans:
+    print("\nOrphan SVIs detected on seed device:")
+    for o in orphans:
+        print(f" - IP: {o.get('ip','?')} VLAN: {o.get('vlan','?')} Iface: {o.get('ifname','?')}")
 
-    if merge_hostname:
-        merge_by_hostname(g)
+if merge_hostname:
+    merge_by_hostname(g)
 
-    return g
+return g
