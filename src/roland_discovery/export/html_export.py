@@ -12,7 +12,7 @@ def _inject_search_ui(path: str) -> None:
         return
 
     css = """<style>
-        .vis-tooltip { white-space: pre-line; font-family: monospace; font-size: 12px; }
+        .vis-tooltip { white-space: pre-line; font-family: monospace; font-size: 12px; padding: 8px; background: #fff; border: 1px solid #ccc; border-radius: 6px; }
         #rolandSearch { position: fixed; top: 12px; left: 12px; z-index: 9999; padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; background: #fff; font-family: system-ui,Segoe UI,Arial,sans-serif; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
         #rolandSearch input { width: 320px; padding: 6px 8px; border-radius: 8px; border: 1px solid #bbb; }
         #rolandSearch .hint { font-size: 12px; color: #555; margin-top: 6px; }
@@ -144,8 +144,8 @@ def _inject_search_ui(path: str) -> None:
 
 
 def _node_label(attrs: dict, node_id: str) -> str:
-    ip = attrs.get("ip") or ""
     hn = attrs.get("hostname") or ""
+    ip = attrs.get("ip") or ""
     if hn and ip:
         return f"{hn}\n{ip}"
     if hn:
@@ -160,7 +160,7 @@ def _node_title(attrs: dict, node_id: str) -> str:
     if hn:
         parts.append(f"Hostname: {hn}")
     if ip:
-        parts.append(f"IP: {ip}")
+        parts.append(f"Primary IP (discovery): {ip}")
     ps = attrs.get("poll_status")
     if ps:
         parts.append(f"Poll: {ps}")
@@ -175,9 +175,15 @@ def _node_title(attrs: dict, node_id: str) -> str:
         parts.append(f"sysDescr: {attrs.get('sysdescr')}")
     if attrs.get("endpoint_count") is not None:
         parts.append(f"Endpoints: {attrs.get('endpoint_count')}")
-    ips = attrs.get("ips")
+    ips = attrs.get("ips", [])
     if ips:
-        parts.append("Known IPs: " + ", ".join(ips[:5]) + (" ..." if len(ips) > 5 else ""))
+        if len(ips) <= 15:
+            shown_ips = ", ".join(ips)
+            extra = ""
+        else:
+            shown_ips = ", ".join(ips[:15])
+            extra = f" (+{len(ips)-15} more)"
+        parts.append(f"Known IPs: {shown_ips}{extra}")
     if attrs.get("unknown"):
         parts.append("Unknown node (no mgmt IP)")
     if attrs.get("confidence") is not None:
@@ -204,7 +210,16 @@ def _node_title(attrs: dict, node_id: str) -> str:
         if isinstance(trunks, dict):
             parts.append(f"Trunk ports: {len(trunks)}")
         if isinstance(swp, dict):
-            modes = [v.get('mode') for v in swp.values() if isinstance(v, dict) and v.get('mode')]
+            modes = []
+            for port_data in swp.values():
+                if isinstance(port_data, dict):
+                    mode = port_data.get('mode', '').lower()
+                    if mode:
+                        modes.append(mode)
+                    elif port_data.get('access_vlan') or port_data.get('voice_vlan'):
+                        modes.append('access')  # infer access if VLANs present but mode missing
+                    else:
+                        modes.append('unknown')
             access = modes.count('access')
             trunk = modes.count('trunk')
             other = len(modes) - access - trunk
@@ -213,14 +228,18 @@ def _node_title(attrs: dict, node_id: str) -> str:
 
 
 def _edge_label(attrs: dict) -> str:
-    """Descriptive text on the line (e.g. Gi1/0/24 → TenGigabitEthernet1/0/1)"""
+    """Descriptive text on the line (uses stored label if present)"""
+    if "label" in attrs:
+        return attrs["label"]
     lif = attrs.get("local_if", "?")
     rif = attrs.get("remote_if", "?")
     return f"{lif} → {rif}"
 
 
 def _edge_title(attrs: dict) -> str:
-    """Tooltip when hovering over the line"""
+    """Tooltip when hovering over the line (uses stored title if present)"""
+    if "title" in attrs:
+        return attrs["title"]
     parts = []
     proto = attrs.get("proto", "cdp")
     parts.append(f"Protocol: {proto.upper()}")
@@ -270,4 +289,4 @@ def export_html(g, path: str):
 
     net.show_buttons(filter_=["physics"])
     net.write_html(path)
-    _inject_search_ui(path) 
+    _inject_search_ui(path)
