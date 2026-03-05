@@ -408,20 +408,20 @@ def build_topology(
 
                     role_obj = classify_device("", remote_device)
 
-                    # === VLAN DETECTION - use CDP short name (Gi1/1/1) directly ===
+                    # === VLAN DETECTION - direct match with short name from CDP ===
                     vlan_info = ""
                     link_type = "unknown"
 
                     switching = g.nodes[ip].get("ssh_switching") or {}
                     swp = switching.get("switchports") or {}
 
-                    # Debug confirmation (remove after testing)
+                    # Debug (remove after success)
                     if swp:
-                        print(f"[DEBUG SWITCHPORTS] Checking '{local_if}' in keys (first 5: {list(swp.keys())[:5]})")
+                        print(f"[DEBUG SWITCHPORTS] Checking short '{local_if}' in keys (first 5: {list(swp.keys())[:5]})")
                         if local_if in swp:
-                            print(f"[DEBUG VLAN MATCH] Direct hit on '{local_if}'!")
+                            print(f"[DEBUG VLAN SUCCESS] Matched '{local_if}'!")
 
-                    # Direct lookup with original short name from CDP
+                    # Use the original CDP-provided short name (Gi1/1/1) directly
                     if isinstance(swp, dict) and local_if in swp:
                         port_data = swp[local_if]
                         if isinstance(port_data, dict):
@@ -439,7 +439,8 @@ def build_topology(
                     if vlan_info:
                         edge_label += vlan_info
 
-                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"                    
+                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"
+
                     if remote_ip not in g:
                         g.add_node(remote_ip, **{
                             "ip": remote_ip,
