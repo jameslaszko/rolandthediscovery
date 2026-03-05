@@ -424,6 +424,9 @@ def build_topology(
                     # Use the original CDP-provided short name (Gi1/1/1) directly
                     if isinstance(swp, dict) and local_if in swp:
                         port_data = swp[local_if]
+#DEBUG
+                        print(f"[VLAN PORT DATA] For '{local_if}': {port_data}")
+#
                         if isinstance(port_data, dict):
                             mode = port_data.get("mode", "").lower()
                             if "trunk" in mode:
