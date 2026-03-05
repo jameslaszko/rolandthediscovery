@@ -469,6 +469,9 @@ def build_topology(
                             title=edge_title,
                             link_type=link_type
                         )
+                        
+                        print(f"[EDGE] {local_if} → {remote_if} | type={link_type} | vlan_info='{vlan_info}'")
+                        
                         edges_added += 1
                         print(f"[DEBUG] Added CDP edge: {ip} → {remote_ip} ({edge_label})")
                     except Exception as e:
