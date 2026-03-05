@@ -408,18 +408,20 @@ def build_topology(
 
                     role_obj = classify_device("", remote_device)
 
-                                        # === VLAN DETECTION - use short name as seen in switchports keys ===
+                    # === VLAN DETECTION - use CDP short name (Gi1/1/1) directly ===
                     vlan_info = ""
                     link_type = "unknown"
 
                     switching = g.nodes[ip].get("ssh_switching") or {}
                     swp = switching.get("switchports") or {}
 
-                    # Debug keys (already added - keep it for now)
+                    # Debug confirmation (remove after testing)
                     if swp:
-                        print(f"[DEBUG SWITCHPORTS KEYS for {ip}] First 5: {list(swp.keys())[:5]}")
+                        print(f"[DEBUG SWITCHPORTS] Checking '{local_if}' in keys (first 5: {list(swp.keys())[:5]})")
+                        if local_if in swp:
+                            print(f"[DEBUG VLAN MATCH] Direct hit on '{local_if}'!")
 
-                    # Try the exact CDP local_if (short form like 'Gi1/1/1')
+                    # Direct lookup with original short name from CDP
                     if isinstance(swp, dict) and local_if in swp:
                         port_data = swp[local_if]
                         if isinstance(port_data, dict):
@@ -433,21 +435,11 @@ def build_topology(
                                 vlan = port_data.get("access_vlan", "")
                                 vlan_info = f" (access VLAN {vlan})" if vlan else " (access)"
 
-                    # Fallback: try common variations (e.g. Gi1/1/1 vs Gi1/1/1 with space)
-                    if not vlan_info and isinstance(swp, dict):
-                        for key in swp:
-                            if key.replace(" ", "") == local_if.replace(" ", ""):
-                                port_data = swp[key]
-                                # same mode/vlan logic as above...
-                                # (copy the if "trunk" / "access" block here if needed)
-                                break
-
                     edge_label = f"{local_if} → {remote_if}"
                     if vlan_info:
                         edge_label += vlan_info
 
-                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"
-                    
+                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"                    
                     if remote_ip not in g:
                         g.add_node(remote_ip, **{
                             "ip": remote_ip,
@@ -457,6 +449,9 @@ def build_topology(
                         })
 
                     try:
+                        # Use detected type, fallback to trunk for these uplinks
+                        if link_type == "unknown":
+                            link_type = "trunk"  # safe default for HUB connections
                         g.add_edge(
                             ip,
                             remote_ip,
