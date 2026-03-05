@@ -266,6 +266,24 @@ def build_topology(
                     "show cdp neighbors detail", "show vlan brief",
                     "show interfaces trunk", "show interfaces switchport",
                 ])
+
+                # Extract hostname from show version output (fallback if SNMP failed)
+                version_output = results.get("show version", "")
+                if version_output:
+                    # Look for common patterns: "hostname is XXX" or "Switch is running" lines
+                    import re
+                    hn_match = re.search(r'(?:hostname|name)\s*(?:is|:\s*)\s*(\S+)', version_output, re.IGNORECASE)
+                    if not hn_match:
+                        # Fallback: look for the first line with hostname-like string after "Switch"
+                        hn_match = re.search(r'Switch\s+\S+\s+is\s+running.*?\s+(\S+\.srta\.com)', version_output, re.IGNORECASE)
+                    if hn_match:
+                        ssh_hostname = hn_match.group(1).strip()
+                        # Only update if better than current (i.e. not IP)
+                        current_hn = g.nodes[ip].get("hostname", "")
+                        if ssh_hostname and ssh_hostname != ip and ssh_hostname != current_hn:
+                            g.nodes[ip]["hostname"] = ssh_hostname
+                            print(f"[DEBUG] SSH updated hostname from '{current_hn}' to '{ssh_hostname}'")
+
                 ip_int = parse_show_ip_interface_brief(results.get("show ip interface brief", ""))
                 arp = parse_show_arp(results.get("show arp", ""))
                 cdp_detail_raw = results.get("show cdp neighbors detail", "")
@@ -355,10 +373,10 @@ def build_topology(
             else:
                 print(f"[DEBUG] CDP neighbors for {hostname} ({ip}): {len(nbs)} found")
                 for nb in nbs:
-                    # Use correct keys from CdpDetailNeighbor parser
-                    remote_ip = nb.get("mgmt_ip") or nb.get("management_ip") or nb.get("ip")
+                    # Extract all needed values first (safe dict access)
+                    remote_ip = nb.get("mgmt_ip") or nb.get("management_ip") or nb.get("ip") or nb.get("ip_address")
                     if not remote_ip:
-                        print(f"[DEBUG] Skipping neighbor {nb.get('device_id', '?')} - no remote_ip")
+                        print(f"[DEBUG] Skipping neighbor {nb.get('device_id', nb.get('remote_device', '?'))} - no remote_ip")
                         continue
 
                     remote_device = nb.get("device_id") or nb.get("remote_device", "?")
@@ -366,20 +384,21 @@ def build_topology(
                         print(f"[DEBUG] Skipping Axis camera: {remote_device} @ {remote_ip}")
                         continue
 
+                    local_if = nb.get("local_interface") or nb.get("local_if") or nb.get("localPort", "?")
+                    remote_if = nb.get("remote_interface") or nb.get("remote_port") or nb.get("port", "?")
+                    platform = nb.get("platform", "?")
                     role_obj = classify_device("", remote_device)
 
                     if remote_ip not in g:
                         g.add_node(remote_ip, **{
                             "ip": remote_ip,
                             "hostname": remote_device,
-                            "platform": nb.get("platform"),
+                            "platform": platform,
                             "device_role": role_obj,
                         })
 
-                    local_if = nb.get("local_interface") or nb.get("local_if", "?")
-                    remote_if = nb.get("remote_interface") or nb.get("remote_port", "?")
                     edge_label = f"{local_if} → {remote_if}"
-                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {nb.get('platform', '?')}"
+                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"
 
                     try:
                         g.add_edge(
@@ -389,7 +408,7 @@ def build_topology(
                             local_if=local_if,
                             remote_if=remote_if,
                             remote_device=remote_device,
-                            platform=nb.get("platform"),
+                            platform=platform,
                             label=edge_label,
                             title=edge_title,
                         )
@@ -406,7 +425,7 @@ def build_topology(
                         print(f"[roland] max-edges reached; stopping")
                         q.clear()
                         break
-
+                        
         except Exception as e:
             g.nodes[ip]["cdp_error"] = str(e)
             print(f"[roland] CDP block failed for {ip}: {type(e).__name__}: {e}")

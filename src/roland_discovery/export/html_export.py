@@ -276,13 +276,14 @@ def export_html(g, path: str):
 
     # Edges with labels, colors, and tooltips
     for u, v, data in g.edges(data=True):
-        label = data.get("label") or _edge_label(data)
-        title = data.get("title") or _edge_title(data)
+        label = data.get("label") or f"{data.get('local_if', '?')} → {data.get('remote_if', '?')}"
+        title = data.get("title") or f"{label}\nProtocol: {data.get('proto', 'cdp')}\nRemote: {data.get('remote_device', '?')}\nPlatform: {data.get('platform', '?')}"
 
+        # Color by link type (access = orange, trunk = blue, unknown = gray)
         link_type = data.get("link_type", "unknown")
         color = "#ffa500" if link_type == "access" else \
                 "#97c2fc" if link_type == "trunk" else \
-                "#cccccc"  # gray for unknown
+                "#cccccc"
 
         net.add_edge(
             u, v,
@@ -292,7 +293,7 @@ def export_html(g, path: str):
             font={"size": 10, "align": "middle"},
             color={"color": color, "highlight": "#4a8cff"}
         )
-
+        
     net.show_buttons(filter_=["physics"])
     net.write_html(path)
     _inject_search_ui(path)
