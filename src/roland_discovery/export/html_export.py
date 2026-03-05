@@ -289,9 +289,12 @@ def export_html(g, path: str):
         # Color by link type
         link_type = data.get("link_type", "unknown")
         color = "#ffa500" if link_type == "access" else \
-                "#4a8cff" if link_type == "trunk" else \
-                "#999999"  # gray
+                "#4a8cff" if link_type in ["trunk", "routed"] else \
+                "#999999"
 
+        width = 2.5 if link_type in ["trunk", "routed"] else 1.5
+        arrows = "to" if link_type in ["trunk", "routed"] else "to"
+        
         net.add_edge(
             u, v,
             label=label,

@@ -409,24 +409,16 @@ def build_topology(
                     role_obj = classify_device("", remote_device)
 
                     # === VLAN DETECTION - direct match with short name from CDP ===
+
                     vlan_info = ""
                     link_type = "unknown"
 
                     switching = g.nodes[ip].get("ssh_switching") or {}
                     swp = switching.get("switchports") or {}
 
-                    # Debug (remove after success)
-                    if swp:
-                        print(f"[DEBUG SWITCHPORTS] Checking short '{local_if}' in keys (first 5: {list(swp.keys())[:5]})")
-                        if local_if in swp:
-                            print(f"[DEBUG VLAN SUCCESS] Matched '{local_if}'!")
-
-                    # Use the original CDP-provided short name (Gi1/1/1) directly
-                    if isinstance(swp, dict) and local_if in swp:
+                    if local_if in swp:
+                        # Real switchport logic (for access ports / trunks)
                         port_data = swp[local_if]
-#DEBUG
-                        print(f"[VLAN PORT DATA] For '{local_if}': {port_data}")
-#
                         if isinstance(port_data, dict):
                             mode = port_data.get("mode", "").lower()
                             if "trunk" in mode:
@@ -437,11 +429,20 @@ def build_topology(
                                 link_type = "access"
                                 vlan = port_data.get("access_vlan", "")
                                 vlan_info = f" (access VLAN {vlan})" if vlan else " (access)"
+                    else:
+                        # Not in switchports → likely routed uplink
+                        link_type = "routed"
+                        vlan_info = " (routed L3 uplink)"
+
+                    # Beautify known core/HUB links
+                    if "HUB_" in remote_device or remote_device.endswith(".srta.com"):
+                        vlan_info = " (core uplink - routed L3)" if link_type == "routed" else vlan_info
+                        link_type = "trunk"  # color as trunk anyway (important link)
 
                     edge_label = f"{local_if} → {remote_if}"
                     if vlan_info:
                         edge_label += vlan_info
-
+                        
                     edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"
 
                     if remote_ip not in g:
