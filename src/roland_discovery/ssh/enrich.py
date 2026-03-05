@@ -364,12 +364,6 @@ def collect_switching_catalog(ssh=None, results=None):
                 elif "Voice VLAN:" in line:
                     current_data["voice_vlan"] = line.split(":", 1)[1].strip()
 
-            # Add routed port detection
-            routed_ports = []
-            for line in output_lines:  # from show run or show ip int brief
-                if "interface GigabitEthernet" in line or "interface TenGigabitEthernet" in line:
-                    # parse if "no switchport" is present
-
         if current_port:
             catalog["switchports"][current_port] = current_data
 
