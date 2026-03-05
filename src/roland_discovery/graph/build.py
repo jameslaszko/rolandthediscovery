@@ -236,6 +236,22 @@ def build_topology(
             print(f"[DEBUG] SNMP poll failed for {ip}: {poll_error}")
 
         hostname = (sysname or ip).strip()
+
+        # After SSH enrichment succeeds, try to override hostname from SSH data
+        if enable_ssh and "ssh_status" in g.nodes[ip] and g.nodes[ip]["ssh_status"] == "ok":
+            # If you have a parsed hostname from show version or other command
+            # (check enrich.py or add simple parsing here)
+            version_output = results.get("show version", "")
+            if version_output:
+                import re
+                # Look for common patterns in show version output
+                hn_match = re.search(r'(?:hostname|name)\s*(?:is|:\s*)\s*(\S+)', version_output, re.IGNORECASE)
+                if hn_match:
+                    ssh_hn = hn_match.group(1).strip()
+                    if ssh_hn and ssh_hn != ip:
+                        hostname = ssh_hn
+                        print(f"[DEBUG] SSH overrode hostname to: {ssh_hn}")
+                
         role = classify_device(sysdescr or "", hostname)
         print(f"[DEBUG classify seed] {hostname} → sysdescr: {sysdescr[:100]} → role: {role}")
 
@@ -316,6 +332,8 @@ def build_topology(
         # Orphan SVI detection
         try:
             switching = g.nodes[ip].get("ssh_switching") or {}
+#DEBUG            
+            print(f"[DEBUG VLAN check] Local IF '{local_if}' found in switchports? {local_if in swp}")
             trunks = switching.get("trunks", {}) if isinstance(switching, dict) else {}
             uplink_ports: Set[str] = {ed.get("local_if") for _, _, ed in g.edges(ip, data=True) if ed.get("local_if")}
             uplink_trunks = []
@@ -373,10 +391,10 @@ def build_topology(
             else:
                 print(f"[DEBUG] CDP neighbors for {hostname} ({ip}): {len(nbs)} found")
                 for nb in nbs:
-                    # Extract all needed values first (safe dict access)
-                    remote_ip = nb.get("mgmt_ip") or nb.get("management_ip") or nb.get("ip") or nb.get("ip_address")
+                    # Safe extraction of fields from dict
+                    remote_ip = nb.get("mgmt_ip") or nb.get("management_ip") or nb.get("ip")
                     if not remote_ip:
-                        print(f"[DEBUG] Skipping neighbor {nb.get('device_id', nb.get('remote_device', '?'))} - no remote_ip")
+                        print(f"[DEBUG] Skipping neighbor {nb.get('device_id', '?')} - no remote_ip")
                         continue
 
                     remote_device = nb.get("device_id") or nb.get("remote_device", "?")
@@ -384,11 +402,52 @@ def build_topology(
                         print(f"[DEBUG] Skipping Axis camera: {remote_device} @ {remote_ip}")
                         continue
 
-                    local_if = nb.get("local_interface") or nb.get("local_if") or nb.get("localPort", "?")
+                    local_if = nb.get("local_interface") or nb.get("local_if", "?")
                     remote_if = nb.get("remote_interface") or nb.get("remote_port") or nb.get("port", "?")
                     platform = nb.get("platform", "?")
+
                     role_obj = classify_device("", remote_device)
 
+                                        # === VLAN DETECTION - use short name as seen in switchports keys ===
+                    vlan_info = ""
+                    link_type = "unknown"
+
+                    switching = g.nodes[ip].get("ssh_switching") or {}
+                    swp = switching.get("switchports") or {}
+
+                    # Debug keys (already added - keep it for now)
+                    if swp:
+                        print(f"[DEBUG SWITCHPORTS KEYS for {ip}] First 5: {list(swp.keys())[:5]}")
+
+                    # Try the exact CDP local_if (short form like 'Gi1/1/1')
+                    if isinstance(swp, dict) and local_if in swp:
+                        port_data = swp[local_if]
+                        if isinstance(port_data, dict):
+                            mode = port_data.get("mode", "").lower()
+                            if "trunk" in mode:
+                                link_type = "trunk"
+                                allowed = port_data.get("trunk_allowed_vlans") or port_data.get("allowed_vlans", "")
+                                vlan_info = f" (trunk, allowed: {allowed or 'all'})"
+                            elif "access" in mode or port_data.get("access_vlan"):
+                                link_type = "access"
+                                vlan = port_data.get("access_vlan", "")
+                                vlan_info = f" (access VLAN {vlan})" if vlan else " (access)"
+
+                    # Fallback: try common variations (e.g. Gi1/1/1 vs Gi1/1/1 with space)
+                    if not vlan_info and isinstance(swp, dict):
+                        for key in swp:
+                            if key.replace(" ", "") == local_if.replace(" ", ""):
+                                port_data = swp[key]
+                                # same mode/vlan logic as above...
+                                # (copy the if "trunk" / "access" block here if needed)
+                                break
+
+                    edge_label = f"{local_if} → {remote_if}"
+                    if vlan_info:
+                        edge_label += vlan_info
+
+                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"
+                    
                     if remote_ip not in g:
                         g.add_node(remote_ip, **{
                             "ip": remote_ip,
@@ -396,9 +455,6 @@ def build_topology(
                             "platform": platform,
                             "device_role": role_obj,
                         })
-
-                    edge_label = f"{local_if} → {remote_if}"
-                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"
 
                     try:
                         g.add_edge(
@@ -411,6 +467,7 @@ def build_topology(
                             platform=platform,
                             label=edge_label,
                             title=edge_title,
+                            link_type=link_type
                         )
                         edges_added += 1
                         print(f"[DEBUG] Added CDP edge: {ip} → {remote_ip} ({edge_label})")

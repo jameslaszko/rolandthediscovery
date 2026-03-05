@@ -44,7 +44,7 @@ class SnmpV2cClient:
             print(f"[WARN SNMP] get failed for {oid}: {str(e)}")
             return None
             
-    def __init__(self, host: str, community: str, timeout: int = 2, retries: int = 1) -> None:
+    def __init__(self, host: str, community: str, timeout: int = 5, retries: int = 1) -> None:
         self.host = host
         self.community = community
         self.timeout = timeout

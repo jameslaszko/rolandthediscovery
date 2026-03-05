@@ -144,13 +144,13 @@ def _inject_search_ui(path: str) -> None:
 
 
 def _node_label(attrs: dict, node_id: str) -> str:
-    hn = attrs.get("hostname") or ""
-    ip = attrs.get("ip") or ""
-    if hn and ip:
+    hn = attrs.get("hostname")
+    ip = attrs.get("ip") or node_id
+    
+    # Prefer hostname if available and not just an IP
+    if hn and not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hn.strip()):
         return f"{hn}\n{ip}"
-    if hn:
-        return hn
-    return ip or node_id
+    return ip
 
 
 def _node_title(attrs: dict, node_id: str) -> str:
@@ -274,24 +274,31 @@ def export_html(g, path: str):
                 "#66cc66"
         net.add_node(n, label=label, title=title, size=size, color=color)
 
-    # Edges with labels, colors, and tooltips
+    # Edges with visible labels, type-based colors, and rich tooltips
     for u, v, data in g.edges(data=True):
-        label = data.get("label") or f"{data.get('local_if', '?')} → {data.get('remote_if', '?')}"
-        title = data.get("title") or f"{label}\nProtocol: {data.get('proto', 'cdp')}\nRemote: {data.get('remote_device', '?')}\nPlatform: {data.get('platform', '?')}"
+        local_if = data.get('local_if', '?')
+        remote_if = data.get('remote_if', '?')
+        label = data.get("label") or f"{local_if} → {remote_if}"
 
-        # Color by link type (access = orange, trunk = blue, unknown = gray)
+        # Append VLAN info from edge data
+        if "vlan_info" in data and data["vlan_info"]:
+            label += data["vlan_info"]
+
+        title = data.get("title") or f"{label}\nProtocol: cdp\nRemote device: {data.get('remote_device', '?')}\nPlatform: {data.get('platform', '?')}\nType: {data.get('link_type', 'unknown')}"
+
+        # Color by link type
         link_type = data.get("link_type", "unknown")
         color = "#ffa500" if link_type == "access" else \
-                "#97c2fc" if link_type == "trunk" else \
-                "#cccccc"
+                "#4a8cff" if link_type == "trunk" else \
+                "#999999"  # gray
 
         net.add_edge(
             u, v,
             label=label,
             title=title,
             arrows="to",
-            font={"size": 10, "align": "middle"},
-            color={"color": color, "highlight": "#4a8cff"}
+            font={"size": 11, "align": "middle"},
+            color={"color": color, "highlight": "#ff4444"}
         )
         
     net.show_buttons(filter_=["physics"])
