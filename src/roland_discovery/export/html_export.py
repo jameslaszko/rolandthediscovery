@@ -292,7 +292,7 @@ def export_html(g, path: str):
                 "#4a8cff" if link_type in ["trunk", "routed"] else \
                 "#999999"
 
-        width = 2.5 if link_type in ["trunk", "routed"] else 1.5
+        width = 3 if link_type in ["trunk", "routed"] else 1.5
         arrows = "to" if link_type in ["trunk", "routed"] else "to"
         
         net.add_edge(

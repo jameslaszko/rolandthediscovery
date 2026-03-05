@@ -443,7 +443,7 @@ def build_topology(
                     if vlan_info:
                         edge_label += vlan_info
                         
-                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}"
+                    edge_title = f"{edge_label}\nRemote: {remote_device}\nPlatform: {platform}\nType: Routed L3 core uplink"
 
                     if remote_ip not in g:
                         g.add_node(remote_ip, **{
