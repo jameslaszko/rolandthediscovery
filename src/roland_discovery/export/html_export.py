@@ -290,15 +290,14 @@ def export_html(g, path: str):
                 "#4a8cff" if link_type == "routed" else \
                 "#b200ff" if link_type == "trunk" else \
                 "#999999"
-        width = 3 if link_type in ["trunk", "routed"] else 1.5
-
+        width = 3 if link_type == "trunk" else 2 if link_type == "routed" else 1.5
         net.add_edge(
             u, v,
             label=label,
             title=title,
             arrows="to",
             font={"size": 11, "align": "middle"},
-            color={"color": color, "highlight": "#ff4444"}
+            color={"color": color, "highlight": color}
         )
 
     net.show_buttons(filter_=["physics"])

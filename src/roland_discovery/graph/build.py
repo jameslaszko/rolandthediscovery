@@ -18,12 +18,34 @@ from roland_discovery.snmp.ipmib import load_interface_ips, load_ip_to_ifname
 from roland_discovery.snmp.system import get_sysdescr, get_sysname
 from roland_discovery.ssh.client import SshClient, SshProfile, load_ssh_profile_from_env
 
+def _normalize_ifname(ifname: Optional[str]) -> str:
+    if not ifname:
+        return ""
+    s = ifname.lower().replace(" ", "")
+
+    # normalize common Cisco prefixes
+    s = s.replace("tengigabitethernet", "te")
+    s = s.replace("gigabitethernet", "gi")
+    s = s.replace("fastethernet", "fa")
+
+    return s
 
 def _snmp_factory(profile: Any, ip: str):
-    if isinstance(profile, SnmpProfile):
-        return SnmpV2cClient(host=ip, community=profile.community, timeout=60, retries=5)
-    raise TypeError(f"Unsupported SNMP profile type. Got: {type(profile)!r}")
+    communities = [profile.community]
 
+    # add SRT fallback
+    if ip.startswith("10.") or ip.startswith("172.") or ip.startswith("192."):
+        communities.append("srtanwc75n3t44")
+
+    for comm in communities:
+        try:
+            client = SnmpV2cClient(host=ip, community=comm, timeout=60, retries=2)
+            if client._check_snmp_health():
+                return client
+        except:
+            continue
+
+    raise RuntimeError(f"All SNMP communities failed for {ip}")
 
 def _save_state(path: str, g: nx.MultiGraph, q: Deque[Tuple[str, int]], visited: Set[str]) -> None:
     data = {
@@ -683,8 +705,15 @@ def build_topology(
                     switching = g.nodes[local_node_key].get("ssh_switching") or {}
                     swp = switching.get("switchports") or {}
 
-                    if local_if in swp:
-                        port_data = swp[local_if]
+                    norm_local = _normalize_ifname(local_if)
+
+                    swp_norm = {
+                        _normalize_ifname(k): v
+                        for k, v in swp.items()
+                    }
+
+                    if norm_local in swp_norm:
+                        port_data = swp_norm[norm_local]
                         if isinstance(port_data, dict):
                             mode = str(port_data.get("mode", "")).lower()
                             if "trunk" in mode:
@@ -696,13 +725,15 @@ def build_topology(
                                 vlan = port_data.get("access_vlan", "")
                                 vlan_info = f" (access VLAN {vlan})" if vlan else " (access)"
                     else:
-                        link_type = "routed"
-                        vlan_info = " (routed L3 uplink)"
+                        else:
+                            link_type = "unknown"
+                            vlan_info = ""
+                    if link_type == "unknown":
+                        remote_role = remote_class.role if isinstance(remote_class, DeviceClass) else "unknown"
+                        local_role = g.nodes[local_node_key].get("device_role", "unknown")
 
-                    if "HUB_" in remote_device.upper() or remote_device.endswith(".srta.com"):
-                        if link_type == "routed":
-                            vlan_info = " (core uplink - routed L3)"
-                        link_type = "trunk"
+                        if remote_role in ["switch", "router"] and local_role in ["switch", "router"]:
+                            link_type = "trunk"
 
                     edge_label = f"{local_if} → {remote_if}"
                     if vlan_info:
