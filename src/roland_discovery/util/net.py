@@ -1,6 +1,28 @@
 import ipaddress
 from typing import Iterable, List
+from ipaddress import ip_interface, IPv4Network, IPv4Interface
 
+def same_subnet(ip1: str, ip2: str) -> bool:
+    """Return True if two IPs are in the same subnet (any mask)."""
+    try:
+        i1 = ip_interface(ip1)
+        i2 = ip_interface(ip2)
+        return i1.network == i2.network
+    except:
+        return False
+
+def is_point_to_point(ip1: str, ip2: str) -> bool:
+    """Return True if two IPs form a valid /30 or /31 routed link."""
+    try:
+        i1 = ip_interface(ip1)
+        i2 = ip_interface(ip2)
+        net = i1.network
+        if net.prefixlen in (30, 31):
+            return i1.network == i2.network
+        return False
+    except:
+        return False
+        
 def _parse_nets(cidrs: Iterable[str]) -> List[ipaddress._BaseNetwork]:
     nets = []
     for c in cidrs or []:

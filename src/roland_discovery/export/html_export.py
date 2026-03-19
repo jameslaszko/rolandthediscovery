@@ -5,7 +5,7 @@ from pyvis.network import Network
 
 
 def _inject_search_ui(path: str) -> None:
-    """Inject a simple search box and tooltip styling into the generated PyVis HTML."""
+    """Inject search box and tooltip styling into PyVis HTML."""
     try:
         html = open(path, "r", encoding="utf-8").read()
     except Exception:
@@ -135,7 +135,6 @@ def _inject_search_ui(path: str) -> None:
     html2 = html.replace("<body>", "<body>\n" + css + "\n" + ui + "\n", 1)
     if "</body>" in html2:
         html2 = html2.replace("</body>", js + "\n</body>", 1)
-
     if html2 != html:
         try:
             open(path, "w", encoding="utf-8").write(html2)
@@ -145,22 +144,30 @@ def _inject_search_ui(path: str) -> None:
 
 def _node_label(attrs: dict, node_id: str) -> str:
     hn = attrs.get("hostname")
-    ip = attrs.get("ip") or node_id
-    
-    # Prefer hostname if available and not just an IP
-    if hn and not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hn.strip()):
-        return f"{hn}\n{ip}"
-    return ip
+    main_ip = attrs.get("main_ip") or node_id
+    label = hn if hn and hn != main_ip else main_ip
+    ips = attrs.get("ips", [])
+    if len(ips) > 1:
+        label += f" ({len(ips)} IPs)"
+    return label
 
 
 def _node_title(attrs: dict, node_id: str) -> str:
     parts = []
-    ip = attrs.get("ip")
     hn = attrs.get("hostname")
+    main_ip = attrs.get("main_ip")
     if hn:
         parts.append(f"Hostname: {hn}")
-    if ip:
-        parts.append(f"Primary IP (discovery): {ip}")
+    if main_ip:
+        parts.append(f"Main/Mgmt IP: {main_ip}")  # Highlighted
+
+    # All IPs
+    ips = attrs.get("ips", [])
+    if ips and len(ips) > 1:
+        shown = ", ".join(ips[:10])
+        extra = f" (+{len(ips)-10} more)" if len(ips) > 10 else ""
+        parts.append(f"All IPs: {shown}{extra}")
+
     ps = attrs.get("poll_status")
     if ps:
         parts.append(f"Poll: {ps}")
@@ -173,23 +180,19 @@ def _node_title(attrs: dict, node_id: str) -> str:
         parts.append(f"SSH error: {attrs.get('ssh_error')}")
     if attrs.get("sysdescr"):
         parts.append(f"sysDescr: {attrs.get('sysdescr')}")
+
     if attrs.get("endpoint_count") is not None:
         parts.append(f"Endpoints: {attrs.get('endpoint_count')}")
-    ips = attrs.get("ips", [])
-    if ips:
-        if len(ips) <= 15:
-            shown_ips = ", ".join(ips)
-            extra = ""
-        else:
-            shown_ips = ", ".join(ips[:15])
-            extra = f" (+{len(ips)-15} more)"
-        parts.append(f"Known IPs: {shown_ips}{extra}")
+
     if attrs.get("unknown"):
         parts.append("Unknown node (no mgmt IP)")
+
     if attrs.get("confidence") is not None:
         parts.append(f"confidence={attrs.get('confidence')}")
+
     if attrs.get("evidence"):
         parts.append(str(attrs.get('evidence')))
+
     orphan = attrs.get("orphan_svis") or []
     if isinstance(orphan, list) and orphan:
         parts.append("---")
@@ -199,6 +202,7 @@ def _node_title(attrs: dict, node_id: str) -> str:
                 parts.append(f" {item.get('ifname')} ({item.get('ip')}) vlan={item.get('vlan')}")
         if len(orphan) > 10:
             parts.append(f" ... ({len(orphan) - 10} more)")
+
     switching = attrs.get("ssh_switching") or {}
     if isinstance(switching, dict) and (switching.get("vlans") or switching.get("trunks") or switching.get("switchports")):
         parts.append("---")
@@ -217,18 +221,18 @@ def _node_title(attrs: dict, node_id: str) -> str:
                     if mode:
                         modes.append(mode)
                     elif port_data.get('access_vlan') or port_data.get('voice_vlan'):
-                        modes.append('access')  # infer access if VLANs present but mode missing
+                        modes.append('access')
                     else:
                         modes.append('unknown')
             access = modes.count('access')
             trunk = modes.count('trunk')
             other = len(modes) - access - trunk
             parts.append(f"Switchport modes: access={access} trunk={trunk} other={other}")
+
     return "\n".join(parts) if parts else node_id
 
 
 def _edge_label(attrs: dict) -> str:
-    """Descriptive text on the line (uses stored label if present)"""
     if "label" in attrs:
         return attrs["label"]
     lif = attrs.get("local_if", "?")
@@ -237,7 +241,6 @@ def _edge_label(attrs: dict) -> str:
 
 
 def _edge_title(attrs: dict) -> str:
-    """Tooltip when hovering over the line (uses stored title if present)"""
     if "title" in attrs:
         return attrs["title"]
     parts = []
@@ -274,28 +277,21 @@ def export_html(g, path: str):
                 "#66cc66"
         net.add_node(n, label=label, title=title, size=size, color=color)
 
-    # Edges with visible labels, type-based colors, and rich tooltips
+    # Edges
     for u, v, data in g.edges(data=True):
         local_if = data.get('local_if', '?')
         remote_if = data.get('remote_if', '?')
         label = data.get("label") or f"{local_if} → {remote_if}"
-
-        # Append VLAN info from edge data
         if "vlan_info" in data and data["vlan_info"]:
             label += data["vlan_info"]
-
         title = data.get("title") or f"{label}\nProtocol: cdp\nRemote device: {data.get('remote_device', '?')}\nPlatform: {data.get('platform', '?')}\nType: {data.get('link_type', 'unknown')}"
-
-        # Color by link type
         link_type = data.get("link_type", "unknown")
         color = "#ffa500" if link_type == "access" else \
                 "#4a8cff" if link_type == "routed" else \
                 "#b200ff" if link_type == "trunk" else \
                 "#999999"
-
         width = 3 if link_type in ["trunk", "routed"] else 1.5
-        arrows = "to" if link_type in ["trunk", "routed"] else "to"
-        
+
         net.add_edge(
             u, v,
             label=label,
@@ -304,7 +300,7 @@ def export_html(g, path: str):
             font={"size": 11, "align": "middle"},
             color={"color": color, "highlight": "#ff4444"}
         )
-        
+
     net.show_buttons(filter_=["physics"])
     net.write_html(path)
     _inject_search_ui(path)

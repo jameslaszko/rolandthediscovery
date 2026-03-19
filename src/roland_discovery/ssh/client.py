@@ -73,138 +73,158 @@ class SshClient:
         self.backoff_base = 1.5  # 1.5s → 2.25s → 3.375s
 
     def _retry_connect(self) -> None:
-        """Internal: Connect with retries on transient errors."""
-        attempt = 0
-        device = {
-            "device_type": "cisco_ios",
-            "host": self.host,
-            "username": self.profile.username,
-            "password": self.profile.password,
-            "port": self.profile.port,
-            "fast_cli": False,
-            "global_delay_factor": 2.0,
-            "timeout": self.profile.connect_timeout,
-            "session_timeout": 120,
-        }
-        while attempt < self.max_retries:
-            try:
-                self.connection = ConnectHandler(**device)
-                if self.debug:
-                    print(f"[SSH] Netmiko connected to {self.host} (attempt {attempt+1})")
-                return
-            except (NetmikoTimeoutException, ConnectionRefusedError, OSError) as e:
-                attempt += 1
-                if attempt == self.max_retries:
-                    if self.debug:
-                        print(f"[SSH] Connect failed after {self.max_retries} attempts: {e}")
-                    raise
-                delay = self.backoff_base ** attempt
-                if self.debug:
-                    print(f"[SSH] Transient connect error (attempt {attempt}/{self.max_retries}): {e}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-            except NetmikoAuthenticationException as e:
-                if self.debug:
-                    print(f"[SSH] Auth failed (permanent): {e}")
-                raise
-            except Exception as e:
-                if self.debug:
-                    print(f"[SSH] Unexpected connect error: {e}")
-                raise
-        raise RuntimeError(f"Max connect retries exceeded for {self.host}")
+            """Internal: Connect with retries on transient errors, but no retry on auth failure."""
+            attempt = 0
+            device = {
+                "device_type": "cisco_ios",
+                "host": self.host,
+                "username": self.profile.username,
+                "password": self.profile.password,
+                "port": self.profile.port,
+                "fast_cli": False,
+                "global_delay_factor": 2.0,
+                "timeout": self.profile.connect_timeout,
+                "session_timeout": 120,
+            }
 
+            while attempt < self.max_retries:
+                try:
+                    self.connection = ConnectHandler(**device)
+                    if self.debug:
+                        print(f"[SSH] Netmiko connected to {self.host} (attempt {attempt+1})")
+                    return
+                except NetmikoAuthenticationException as e:
+                    # Auth failure: no retry, immediate raise
+                    if self.debug:
+                        print(f"[SSH] Auth failed (permanent): {e}")
+                    raise  # Let caller handle
+                except (NetmikoTimeoutException, ConnectionRefusedError, OSError) as e:
+                    attempt += 1
+                    if attempt == self.max_retries:
+                        if self.debug:
+                            print(f"[SSH] Connect failed after {self.max_retries} attempts: {e}")
+                        raise
+                    delay = self.backoff_base ** attempt
+                    if self.debug:
+                        print(f"[SSH] Transient connect error (attempt {attempt}/{self.max_retries}): {e}. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                except Exception as e:
+                    if self.debug:
+                        print(f"[SSH] Unexpected connect error: {e}")
+                    raise
+
+            raise RuntimeError(f"Max connect retries exceeded for {self.host}")
+            
     def connect(self):
         """Public connect method - uses internal retry."""
         self._retry_connect()
 
     def run_commands(self, commands: List[str], disable_paging: bool = True) -> Dict[str, str]:
-        if not self.connection:
-            self.connect()
+            if not self.connection:
+                try:
+                    self.connect()  # This may raise NetmikoAuthenticationException directly
+                except NetmikoAuthenticationException as e:
+                    raise  # Propagate auth failure without retry
 
-        results = {}
-        attempt = 0
+            results = {}
+            attempt = 0
 
-        while attempt < self.max_retries:
-            try:
-                if disable_paging:
-                    if self.debug:
-                        print(f"[SSH] Disabling paging on {self.host}")
-                    self.connection.send_command("terminal length 0", delay_factor=2)
-
-                for cmd in commands:
-                    if self.debug:
-                        print(f"[SSH shell → {self.host}] Sending: {cmd}")
-                    try:
-                        output = self.connection.send_command(
-                            cmd,
-                            delay_factor=2,
-                            max_loops=200,
-                            strip_command=True,
-                            strip_prompt=True
-                        )
-                        results[cmd] = output.strip()
-
-                        # Log raw response
-                        log_raw_response(
-                            protocol="ssh",
-                            host=self.host,
-                            command=cmd,
-                            raw_output=output,
-                            success=True
-                        )
-
+            while attempt < self.max_retries:
+                try:
+                    if disable_paging:
                         if self.debug:
-                            print(f"[SSH shell ← {self.host}] Got {len(output)} chars for '{cmd}'")
-                    except NetmikoTimeoutException as e:
+                            print(f"[SSH] Disabling paging on {self.host}")
+                        self.connection.send_command("terminal length 0", delay_factor=2)
+
+                    for cmd in commands:
+                        if self.debug:
+                            print(f"[SSH shell → {self.host}] Sending: {cmd}")
+                        try:
+                            output = self.connection.send_command(
+                                cmd,
+                                delay_factor=2,
+                                max_loops=200,
+                                strip_command=True,
+                                strip_prompt=True
+                            )
+                            results[cmd] = output.strip()
+
+                            log_raw_response(
+                                protocol="ssh",
+                                host=self.host,
+                                command=cmd,
+                                raw_output=output,
+                                success=True
+                            )
+
+                            if self.debug:
+                                print(f"[SSH shell ← {self.host}] Got {len(output)} chars for '{cmd}'")
+                        except NetmikoTimeoutException as e:
+                            log_raw_response(
+                                protocol="ssh",
+                                host=self.host,
+                                command=cmd,
+                                raw_output="",
+                                success=False,
+                                error=f"Timeout: {str(e)}"
+                            )
+                            if self.debug:
+                                print(f"[SSH] Timeout on command: {cmd}")
+                            raise  # will trigger outer retry
+
+                    return results
+
+                except (NetmikoTimeoutException, OSError, ConnectionResetError) as e:
+                    attempt += 1
+                    if attempt == self.max_retries:
                         log_raw_response(
                             protocol="ssh",
                             host=self.host,
-                            command=cmd,
+                            command=",".join(commands),
                             raw_output="",
                             success=False,
-                            error=f"Timeout: {str(e)}"
+                            error=f"Connection failed after retries: {str(e)}"
                         )
                         if self.debug:
-                            print(f"[SSH] Timeout on command: {cmd}")
-                        raise  # will trigger outer retry
+                            print(f"[SSH] Failed after {self.max_retries} attempts: {e}")
+                        raise
+                    delay = self.backoff_base ** attempt
+                    if self.debug:
+                        print(f"[SSH] Transient error on {self.host} (attempt {attempt}/{self.max_retries}): {e}. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                    self.connection = None
+                    try:
+                        self.connect()  # Reconnect attempt
+                    except NetmikoAuthenticationException as e:
+                        raise  # No retry on auth during reconnect
 
-                return results
-
-            except (NetmikoTimeoutException, OSError, ConnectionResetError) as e:
-                attempt += 1
-                if attempt == self.max_retries:
+                except NetmikoAuthenticationException as e:
                     log_raw_response(
                         protocol="ssh",
                         host=self.host,
                         command=",".join(commands),
                         raw_output="",
                         success=False,
-                        error=f"Session failed after retries: {str(e)}"
+                        error=f"Authentication failed: {str(e)}"
                     )
                     if self.debug:
-                        print(f"[SSH] Failed after {self.max_retries} attempts: {e}")
+                        print(f"[SSH] Auth failed (permanent): {e}")
+                    raise  # No retry on auth failure
+
+                except Exception as e:
+                    log_raw_response(
+                        protocol="ssh",
+                        host=self.host,
+                        command=",".join(commands),
+                        raw_output="",
+                        success=False,
+                        error=str(e)
+                    )
+                    if self.debug:
+                        print(f"[SSH shell error on {self.host}]: {e}")
                     raise
-                delay = self.backoff_base ** attempt
-                if self.debug:
-                    print(f"[SSH] Transient error on {self.host} (attempt {attempt}/{self.max_retries}): {e}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-                # Reconnect on session drop
-                self.connection = None
-                self.connect()
 
-            except Exception as e:
-                log_raw_response(
-                    protocol="ssh",
-                    host=self.host,
-                    command=",".join(commands),
-                    raw_output="",
-                    success=False,
-                    error=str(e)
-                )
-                if self.debug:
-                    print(f"[SSH shell error on {self.host}]: {e}")
-                raise
-
-        raise RuntimeError(f"Max command retries exceeded for {self.host}")
+            raise RuntimeError(f"Max command retries exceeded for {self.host}")
 
     def close(self):
         if self.connection:
