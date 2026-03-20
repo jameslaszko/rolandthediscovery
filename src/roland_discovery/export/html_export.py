@@ -296,6 +296,7 @@ def export_html(g, path: str):
             label=label,
             title=title,
             arrows="to",
+            width=width,
             font={"size": 11, "align": "middle"},
             color={"color": color, "highlight": color}
         )

@@ -18,6 +18,7 @@ from roland_discovery.snmp.ipmib import load_interface_ips, load_ip_to_ifname
 from roland_discovery.snmp.system import get_sysdescr, get_sysname
 from roland_discovery.ssh.client import SshClient, SshProfile, load_ssh_profile_from_env
 
+    
 def _normalize_ifname(ifname: Optional[str]) -> str:
     if not ifname:
         return ""
@@ -291,6 +292,15 @@ def _pick_main_ip(ip: str, ips: List[str], ip_to_ifname: Dict[str, str]) -> str:
 
     return ip
 
+def _invert_ip_to_ifname(ip_to_ifname: Dict[str, str]) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for ip, ifname in (ip_to_ifname or {}).items():
+        out.setdefault(_normalize_ifname(ifname), []).append(ip)
+    return out
+
+def _interface_ips(ifname: str, ip_to_ifname: Dict[str, str]) -> List[str]:
+    inv = _invert_ip_to_ifname(ip_to_ifname)
+    return inv.get(_normalize_ifname(ifname), [])
 
 def _norm_ifname(value: Optional[str]) -> str:
     if not value:
@@ -330,6 +340,52 @@ def deduplicate_graph(g: nx.MultiGraph) -> nx.MultiGraph:
         clean.add_edge(u, v, **attrs)
 
     return clean
+
+def enrich_edge_l3_data(g: nx.MultiGraph) -> nx.MultiGraph:
+    for u, v, attrs in g.edges(data=True):
+        local_if = attrs.get("local_if", "")
+        remote_if = attrs.get("remote_if", "")
+
+        local_ip_to_ifname = g.nodes[u].get("ip_to_ifname") or {}
+        remote_ip_to_ifname = g.nodes[v].get("ip_to_ifname") or {}
+
+        local_if_ips = _interface_ips(local_if, local_ip_to_ifname)
+        remote_if_ips = _interface_ips(remote_if, remote_ip_to_ifname)
+
+        link_type = attrs.get("link_type", "unknown")
+
+        if link_type == "routed" or local_if_ips or remote_if_ips:
+            attrs["link_type"] = "routed"
+
+            l3_bits = []
+            if local_if_ips:
+                l3_bits.append(f"local IPs: {', '.join(sorted(local_if_ips))}")
+            if remote_if_ips:
+                l3_bits.append(f"remote IPs: {', '.join(sorted(remote_if_ips))}")
+
+            vlan_info = f" (L3: {' | '.join(l3_bits)})" if l3_bits else " (routed L3)"
+            attrs["vlan_info"] = vlan_info
+
+            edge_label = f"{local_if} → {remote_if}{vlan_info}"
+            attrs["label"] = f"{edge_label} ({attrs.get('remote_device', '?')})"
+
+            edge_title_lines = [
+                edge_label,
+                f"Remote: {attrs.get('remote_device', '?')}",
+                f"Platform: {attrs.get('platform', '?')}",
+                f"Type: routed",
+            ]
+            if local_if_ips:
+                edge_title_lines.append(f"Local interface IPs: {', '.join(sorted(local_if_ips))}")
+            if remote_if_ips:
+                edge_title_lines.append(f"Remote interface IPs: {', '.join(sorted(remote_if_ips))}")
+
+            attrs["title"] = "\n".join(edge_title_lines)
+            
+            if link_type == "routed" or local_if_ips or remote_if_ips:
+                print(f"[L3-ENRICH] {u} {local_if} -> {v} {remote_if} | local={local_if_ips} remote={remote_if_ips}")
+
+    return g
 
 
 def build_topology(
@@ -704,15 +760,26 @@ def build_topology(
                     link_type = "unknown"
                     switching = g.nodes[local_node_key].get("ssh_switching") or {}
                     swp = switching.get("switchports") or {}
+                    local_ip_to_ifname = g.nodes[local_node_key].get("ip_to_ifname") or {}
+                    remote_ip_to_ifname = g.nodes[remote_node_key].get("ip_to_ifname") or {}
+
+                    local_if_ips = _invert_ip_to_ifname(local_ip_to_ifname).get(_normalize_ifname(local_if), [])
+                    remote_if_ips = _invert_ip_to_ifname(remote_ip_to_ifname).get(_normalize_ifname(remote_if), [])
 
                     norm_local = _normalize_ifname(local_if)
+                    norm_remote = _normalize_ifname(remote_if)
 
                     swp_norm = {
                         _normalize_ifname(k): v
                         for k, v in swp.items()
                     }
 
-                    if norm_local in swp_norm:
+                    # 1) Explicit L3 evidence wins first
+                    if norm_local == "mgmt0" or norm_remote == "mgmt0" or local_if_ips or remote_if_ips:
+                        link_type = "routed"
+
+                    # 2) Explicit switchport evidence next
+                    elif norm_local in swp_norm:
                         port_data = swp_norm[norm_local]
                         if isinstance(port_data, dict):
                             mode = str(port_data.get("mode", "")).lower()
@@ -724,26 +791,33 @@ def build_topology(
                                 link_type = "access"
                                 vlan = port_data.get("access_vlan", "")
                                 vlan_info = f" (access VLAN {vlan})" if vlan else " (access)"
-                        else:
-                            link_type = "unknown"
-                            vlan_info = ""
-                    if link_type == "unknown":
-                        remote_role = remote_class.role if isinstance(remote_class, DeviceClass) else "unknown"
-                        local_role = g.nodes[local_node_key].get("device_role", "unknown")
 
-                        if remote_role in ["switch", "router"] and local_role in ["switch", "router"]:
-                            link_type = "trunk"
+                    # 3) Final fallback stays unknown; do not force trunk
+
+                    if link_type == "routed":
+                        l3_bits = []
+                        if local_if_ips:
+                            l3_bits.append(f"local IPs: {', '.join(sorted(local_if_ips))}")
+                        if remote_if_ips:
+                            l3_bits.append(f"remote IPs: {', '.join(sorted(remote_if_ips))}")
+                        vlan_info = f" (L3: {' | '.join(l3_bits)})" if l3_bits else " (routed L3)"
 
                     edge_label = f"{local_if} → {remote_if}"
                     if vlan_info:
                         edge_label += vlan_info
 
-                    edge_title = (
-                        f"{edge_label}\n"
-                        f"Remote: {remote_device}\n"
-                        f"Platform: {platform}\n"
-                        f"Type: {link_type}"
-                    )
+                    edge_title_lines = [
+                        edge_label,
+                        f"Remote: {remote_device}",
+                        f"Platform: {platform}",
+                        f"Type: {link_type}",
+                    ]
+                    if local_if_ips:
+                        edge_title_lines.append(f"Local interface IPs: {', '.join(sorted(local_if_ips))}")
+                    if remote_if_ips:
+                        edge_title_lines.append(f"Remote interface IPs: {', '.join(sorted(remote_if_ips))}")
+
+                    edge_title = "\n".join(edge_title_lines)
 
                     g.add_edge(
                         local_node_key,
@@ -789,6 +863,9 @@ def build_topology(
     if merge_hostname:
         print("[INFO] Running final hostname merge...")
         g = merge_by_hostname(g)
+
+    print("[INFO] Enriching final L3 edge data...")
+    g = enrich_edge_l3_data(g)
 
     print(f"[DEBUG] Final graph: {len(g.nodes)} nodes, {len(g.edges)} edges")
 
