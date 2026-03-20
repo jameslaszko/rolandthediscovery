@@ -724,7 +724,6 @@ def build_topology(
                                 link_type = "access"
                                 vlan = port_data.get("access_vlan", "")
                                 vlan_info = f" (access VLAN {vlan})" if vlan else " (access)"
-                    else:
                         else:
                             link_type = "unknown"
                             vlan_info = ""
